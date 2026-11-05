@@ -84,7 +84,7 @@ def repo_node(name, full):
     return node
 
 
-if argv[:2] == ["auth", "status"]:
+if argv[:2] in (["auth", "status"], ["auth", "token"]):
     sys.exit(0)
 
 if argv[:2] == ["api", "graphql"]:

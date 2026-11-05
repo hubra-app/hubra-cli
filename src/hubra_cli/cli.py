@@ -191,9 +191,33 @@ def for_each(repos: list[str], action, ctx: dict, parallel: bool = True) -> None
 # ── gh ───────────────────────────────────────────────────────────────────────
 
 
+CACHE: str | None = None  # e.g. "60s": GET answers come from gh's own cache for that long (the TUI sets it)
+
+
+class RateLimited(RuntimeError):
+    """GitHub said: rate limit exceeded. `reset` is when it resets (epoch seconds), if known."""
+
+    def __init__(self, message: str, reset: int | None = None):
+        super().__init__(message)
+        self.reset = reset
+
+
+def rate_limit() -> dict:
+    """{"core": {"remaining", "limit", "reset"}, "graphql": {...}}; asking costs nothing. {} when unknown."""
+    proc = subprocess.run(["gh", "api", "/rate_limit"], capture_output=True, text=True, check=False)
+    try:
+        return json.loads(proc.stdout).get("resources") or {} if proc.returncode == 0 else {}
+    except ValueError:
+        return {}
+
+
 def gh(*args: str, stdin: str | None = None, check: bool = True) -> str:
     """Run gh and return its output; raises with gh's message on failure."""
     proc = subprocess.run(["gh", *args], input=stdin, capture_output=True, text=True, check=False)
+    if proc.returncode != 0 and "rate limit" in proc.stderr.lower():
+        reset = (rate_limit().get("core") or {}).get("reset")
+        when = datetime.fromtimestamp(reset).strftime("%H:%M") if reset else "soon"
+        raise RateLimited(f"GitHub rate limit reached, it resets at {when}", reset)
     if check and proc.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args[:4])}: {proc.stderr.strip()[:300]}")
     return proc.stdout
@@ -205,6 +229,8 @@ def api(method: str, path: str, body: dict | None = None):
         say(f"   [dry-run] {method} {path}")
         return {}
     args = ["api", "-X", method, path, "-H", "Accept: application/vnd.github+json"]
+    if method == "GET" and CACHE:
+        args += ["--cache", CACHE]
     if body is not None:
         args += ["--input", "-"]
     out = gh(*args, stdin=json.dumps(body) if body is not None else None)
@@ -222,7 +248,8 @@ def download(path: str) -> bytes:
 
 def graphql(query: str, **variables) -> dict:
     """A read-only GraphQL query (runs in dry runs too)."""
-    out = gh("api", "graphql", "--input", "-",
+    cache = ["--cache", CACHE] if CACHE else []
+    out = gh("api", "graphql", *cache, "--input", "-",
              stdin=json.dumps({"query": query, "variables": variables}))
     data = json.loads(out)
     if data.get("errors"):
@@ -1334,27 +1361,7 @@ def doctor(repo: str, ctx: dict) -> None:
             problems.append("private vulnerability reporting is off")
 
     if is_plugin(repo):
-        try:
-            env = api("GET", f"/repos/{repo}/environments/plugin-signing")
-        except RuntimeError:
-            env = None
-        if not env:
-            problems.append("no plugin-signing environment")
-        else:
-            rules = env.get("protection_rules") or []
-            if not any(r.get("type") == "required_reviewers" and r.get("reviewers") for r in rules):
-                problems.append("plugin-signing has no required reviewer")
-            policies = api("GET", f"/repos/{repo}/environments/plugin-signing/deployment-branch-policies") or {}
-            if not any(p.get("name") == "v*" and p.get("type") == "tag" for p in policies.get("branch_policies") or []):
-                problems.append("plugin-signing doesn't limit deployments to v* tags")
-            secrets = api("GET", f"/repos/{repo}/environments/plugin-signing/secrets") or {}
-            if "HUBRA_SIGNING_KEY" not in {s.get("name") for s in secrets.get("secrets") or []}:
-                problems.append("HUBRA_SIGNING_KEY is not stored (hubra key)")
-        ours = get_file(repo, ".github/workflows/release.yml")
-        if ours and ctx["template"].get("workflow") and ours[1] != ctx["template"]["workflow"]:
-            problems.append("release.yml differs from the template's")
-        elif not ours:
-            problems.append("no .github/workflows/release.yml")
+        problems += signing_problems(repo, ctx["template"].get("workflow"))
 
     if not problems:
         say("   ok")
@@ -1364,12 +1371,46 @@ def doctor(repo: str, ctx: dict) -> None:
     name = short(repo).removeprefix(PREFIX) if is_plugin(repo) else short(repo)
     if any(p in fixable for p in problems):
         say(f"   fix: hubra doctor --fix {name}")
+    for hint in signing_hints(name, problems):
+        say(f"   fix: {hint}")
+
+
+def signing_problems(repo: str, template_workflow: str | None) -> list[str]:
+    """What a plugin repo needs to release signed zips: the plugin-signing environment, its key, release.yml."""
+    problems = []
+    try:
+        env = api("GET", f"/repos/{repo}/environments/plugin-signing")
+    except RuntimeError:
+        env = None
+    if not env:
+        problems.append("no plugin-signing environment")
+    else:
+        rules = env.get("protection_rules") or []
+        if not any(r.get("type") == "required_reviewers" and r.get("reviewers") for r in rules):
+            problems.append("plugin-signing has no required reviewer")
+        policies = api("GET", f"/repos/{repo}/environments/plugin-signing/deployment-branch-policies") or {}
+        if not any(p.get("name") == "v*" and p.get("type") == "tag" for p in policies.get("branch_policies") or []):
+            problems.append("plugin-signing doesn't limit deployments to v* tags")
+        secrets = api("GET", f"/repos/{repo}/environments/plugin-signing/secrets") or {}
+        if "HUBRA_SIGNING_KEY" not in {s.get("name") for s in secrets.get("secrets") or []}:
+            problems.append("HUBRA_SIGNING_KEY is not stored (hubra key)")
+    ours = get_file(repo, ".github/workflows/release.yml")
+    if ours and template_workflow and ours[1] != template_workflow:
+        problems.append("release.yml differs from the template's")
+    elif not ours:
+        problems.append("no .github/workflows/release.yml")
+    return problems
+
+
+def signing_hints(name: str, problems: list[str], cmd: str = "hubra") -> list[str]:
+    hints = []
     if any("differs from the template" in p or "no .github/workflows" in p for p in problems):
-        say(f"   fix: hubra sync {name}  (PR with the template's files)")
+        hints.append(f"{cmd} sync {name}  (PR with the template's files)")
     if any("plugin-signing" in p for p in problems):
-        say(f"   fix: hubra setup {name}  (plugin-signing environment)")
+        hints.append(f"hubra setup {name}  (plugin-signing environment)")
     if any("HUBRA_SIGNING_KEY" in p for p in problems):
-        say(f"   fix: hubra key <keyfile> {name}")
+        hints.append(f"hubra key <keyfile> {name}")
+    return hints
 
 
 # ── security alerts ──────────────────────────────────────────────────────────
@@ -1404,6 +1445,8 @@ def repo_alerts(repo: str) -> tuple[list[dict], list[str]]:
     for kind, label in ALERT_KINDS:
         try:
             found = api("GET", f"/repos/{repo}/{kind}/alerts?state=open&per_page=100") or []
+        except RateLimited:
+            raise
         except RuntimeError as err:
             text = str(err)
             if kind == "code-scanning" and ("no analysis" in text.lower() or "404" in text):
@@ -1818,7 +1861,7 @@ HUBRA_VIEWS = {
 # ── main ─────────────────────────────────────────────────────────────────────
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     global DRY_RUN
     p = argparse.ArgumentParser(prog="hubra", description="GitHub and Hubra tools for the hubra-app repos",
                                 formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1877,7 +1920,7 @@ def main() -> None:
     sub.add_parser("logout", help="forget the saved Hubra API token")
     sp = sub.add_parser("tui", help="full-screen view of everything (needs: pip install textual)")
     sp.add_argument("--dry-run", action="store_true")
-    args = p.parse_args()
+    args = p.parse_args(argv)
     DRY_RUN = getattr(args, "dry_run", False)
 
     try:

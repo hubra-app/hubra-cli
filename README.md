@@ -123,7 +123,21 @@ the browser · `r` refresh · `m` auto-merge · `M` merge now · `y` mark ready 
 pane and the log are short labels you can click. Every change asks first;
 `hubra tui --dry-run` only shows what it would do.
 
+Nothing reloads on its own, to stay well inside GitHub's rate limit. Repos and Pull requests come from one GraphQL query at the start. Runs and Security, which cost API calls per repo, load the first time you open their tab. `r` reloads the tab you are on. gh caches the same answer for 60 seconds, the header shows how many API calls are left, and a rate limit tells you when it resets.
+
 ![Repo settings drift in the Checks tab](docs/screenshots/checks-doctor.png)
+
+## As a bnb plugin
+
+[bitsandbricks](https://github.com/bitsandbricks-ch/bitsandbricks-cli) (`bnb`) is the general version of this tool: any org, defaults kept in a repo you pick, doctor and sync across all of them. hubra-cli plugs into it:
+
+```sh
+pipx install "git+https://github.com/bitsandbricks-ch/bitsandbricks-cli#egg=bitsandbricks-cli[tui]"
+pipx inject bitsandbricks-cli "git+https://github.com/hubra-app/hubra-cli"
+bnb init bitsandbricks-ch/bitsandbricks-defaults
+```
+
+bnb then has `release`, `ship`, `bump`, `verify`, `key`, `setup`, `lists`, `hubra`, `login` and `logout` from here, plugin.yaml columns in `bnb status`, the plugin-signing checks in `bnb doctor`, and in `bnb tui` the Hubra tab, Checks › Plugin lists and Release zips, keys b, R and S, and the Hubra themes (t). The `hubra` command keeps working on its own.
 
 ## Development
 
