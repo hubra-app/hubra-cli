@@ -185,6 +185,10 @@ if argv[0] == "api":
         if p and tag in p[2] or (repo == "hubra-plugin-teams" and tag == "v1.1.0"):
             out({"object": {"sha": "tagsha"}})
         fail("gh: Not Found (HTTP 404)")
+    if repo == "hubra" and rest.startswith("/contents/app/backend/pyproject.toml"):
+        content('[project]\nname = "hubra-backend"\nversion = "0.2.0"\nrequires-python = ">=3.12"\n', "pysha")
+    if repo == "hubra" and rest.startswith("/contents/app/backend/CHANGELOG"):
+        content("# Changelog\n\nIntro.\n\n## [Unreleased]\n\n### Changed\n\n- Finanzen tabs\n", "clsha")
     if rest.startswith("/contents/"):
         key = f"{repo}/{rest[len('/contents/'):].split('?')[0]}"
         if key in LISTS:

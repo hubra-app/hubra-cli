@@ -62,6 +62,16 @@ so releases can be immutable) →
 `hubra lists --fix` (version bumps in the READMEs; new rows, hubra.club cards
 and the org profile stay yours, see hubra docs/plugin-releases.md).
 
+Hubra itself releases the same way. Its version is `version` in
+`app/backend/pyproject.toml`, and the tag `v<version>` must match it.
+`hubra bump hubra minor` opens a PR on `bump/v<new>` that sets the version and
+moves `[Unreleased]` in `app/backend/CHANGELOG.md` (and `.de.md`) to
+`[<new>] - <date>`. After the merge, `hubra release hubra` pushes the tag:
+release.yml runs the checks, builds the images and waits for the `release`
+environment. `hubra approve hubra` (or `a` in the TUI's Runs tab) approves it,
+and then the images get their version tags and signatures and the release is
+published. In the TUI: select hubra in Repos, then `b`, then `R`.
+
 ## The template is the reference
 
 `hubra-plugins-template` as it is on GitHub now is what every plugin repo

@@ -16,12 +16,16 @@ def test_status_columns_and_detail():
     p = HubraPlugin()
     cols = dict(p.status_columns())
     repo = "hubra-app/hubra-plugin-budgets"
-    assert cols["plugin.yaml"](repo, node()) == "1.2.0"
+    assert cols["version"](repo, node()) == "1.2.0"
     assert cols["to release"](repo, node()) == "v1.2.0"
     assert cols["to release"](repo, node(tags=("v1.2.0",))) == ""
-    assert cols["plugin.yaml"](repo, node(plugin_id="example")) == "template"
-    assert cols["plugin.yaml"]("hubra-app/hubra", node()) == ""
-    assert "to release   v1.2.0  (R releases it)" in p.repo_detail(repo, node())
+    assert cols["version"](repo, node(plugin_id="example")) == "template"
+    assert cols["version"]("hubra-app/hubra", node()) == ""
+    assert "to release   v1.2.0  (R pushes the tag, b bumps the version)" in p.repo_detail(repo, node())
+    core = {"pyproject": {"text": '[project]\nversion = "0.3.0"\n'}, "releases": {"nodes": [{"tagName": "v0.2.0"}]}}
+    assert cols["version"]("hubra-app/hubra", core) == "0.3.0"
+    assert cols["to release"]("hubra-app/hubra", core) == "v0.3.0"
+    assert "version      0.3.0  (app/backend/pyproject.toml)" in p.repo_detail("hubra-app/hubra", core)
     assert "manifest:" in p.graphql_fields
 
 
