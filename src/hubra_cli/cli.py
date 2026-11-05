@@ -69,6 +69,8 @@ sync     Opens one PR per plugin that copies the template's shared files
 verify   Downloads the latest release zip of each plugin (or --tag v1.2.0)
          and checks it like Hubra does: SHA-256 file, SIGNATURE.json signed
          with Hubra.pub, every file hash, id and version against the tag.
+security Open Dependabot, secret-scanning and code-scanning alerts of every
+         repo, most severe first, with links.
 lists    Compares the latest release of each plugin with the hubra README,
          the Marketplace README, the org profile and the hubra.club Modules
          cards. --fix opens PRs for outdated versions in the two READMEs
@@ -1370,6 +1372,68 @@ def doctor(repo: str, ctx: dict) -> None:
         say(f"   fix: hubra key <keyfile> {name}")
 
 
+# ── security alerts ──────────────────────────────────────────────────────────
+
+ALERT_KINDS = (("dependabot", "Dependabot"), ("secret-scanning", "secret scanning"), ("code-scanning", "code scanning"))
+SEVERITY_ORDER = {"critical": 0, "high": 1, "secret": 1, "error": 2, "medium": 2, "moderate": 2,
+                  "warning": 3, "low": 3, "note": 4}
+
+
+def alert_row(kind: str, a: dict) -> dict:
+    if kind == "dependabot":
+        adv = a.get("security_advisory") or {}
+        dep = a.get("dependency") or {}
+        return {"severity": (adv.get("severity") or "?").lower(),
+                "title": f"{(dep.get('package') or {}).get('name', '?')}: {adv.get('summary', '')}",
+                "where": dep.get("manifest_path") or "", "url": a.get("html_url", "")}
+    if kind == "secret-scanning":
+        where = "push protection bypassed" if a.get("push_protection_bypassed") else ""
+        return {"severity": "secret", "title": a.get("secret_type_display_name") or a.get("secret_type") or "secret",
+                "where": where, "url": a.get("html_url", "")}
+    rule = a.get("rule") or {}
+    loc = (a.get("most_recent_instance") or {}).get("location") or {}
+    return {"severity": (rule.get("security_severity_level") or rule.get("severity") or "?").lower(),
+            "title": rule.get("description") or rule.get("id") or "?",
+            "where": f"{loc.get('path', '')}:{loc.get('start_line', '')}" if loc.get("path") else "",
+            "url": a.get("html_url", "")}
+
+
+def repo_alerts(repo: str) -> tuple[list[dict], list[str]]:
+    """Open alerts of all three kinds, most severe first, and what couldn't be read."""
+    alerts, unread = [], []
+    for kind, label in ALERT_KINDS:
+        try:
+            found = api("GET", f"/repos/{repo}/{kind}/alerts?state=open&per_page=100") or []
+        except RuntimeError as err:
+            text = str(err)
+            if kind == "code-scanning" and ("no analysis" in text.lower() or "404" in text):
+                continue  # code scanning isn't set up here: nothing to report
+            hint = "off, or gh lacks access (gh auth refresh -s security_events)"
+            unread.append(f"{label}: {hint if '403' in text or '404' in text else text[:120]}")
+            continue
+        alerts += [dict(alert_row(kind, a), kind=label) for a in found if isinstance(a, dict)]
+    alerts.sort(key=lambda a: SEVERITY_ORDER.get(a["severity"], 5))
+    return alerts, unread
+
+
+def security_report(repo: str, ctx: dict) -> None:
+    alerts, unread = repo_alerts(repo)
+    if not alerts:
+        say("   no open alerts" + (f" ({'; '.join(unread)})" if unread else ""))
+    for a in alerts:
+        say(f"   {a['severity']:<9} {a['kind']:<16} {a['title'][:80]}" + (f"  {a['where']}" if a["where"] else ""))
+        say(f"      {a['url']}")
+    if alerts and unread:
+        say(f"   couldn't read: {'; '.join(unread)}")
+    if alerts:
+        say(f"   all: {WEB}/{repo}/security")
+
+
+def security(repos: list[str]) -> None:
+    for_each(repos, security_report, {})
+
+
+
 # ── sync with the template ───────────────────────────────────────────────────
 
 # Files every plugin shares with the template. The rest (plugin code, README,
@@ -1762,7 +1826,7 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     names_help = "plugin short names, hubra, hubra.club, hubra-plugins; name#12 for one PR"
     for cmd in ("status", "prs", "pr", "merge", "release", "ship", "approve", "runs", "open", "doctor", "setup", "key",
-                "sync", "verify"):
+                "sync", "verify", "security"):
         sp = sub.add_parser(cmd)
         if cmd == "key":
             sp.add_argument("keyfile", help="private key (PEM) of Hubra.pub")
@@ -1883,7 +1947,7 @@ def main() -> None:
             sys.exit(f"Unknown: {', '.join(unknown)}")
         if pick and args.cmd not in ("merge", "ship"):
             sys.exit("name#12 works with merge, ship, pr and open")
-    elif args.cmd in ("status", "prs", "runs", "doctor", "approve"):
+    elif args.cmd in ("status", "prs", "runs", "doctor", "approve", "security"):
         repos = [full(c) for c in CORE] + [full(n) for n in plugins]
     else:
         repos = [full(n) for n in plugins]
@@ -1896,6 +1960,8 @@ def main() -> None:
         return runs(repos, args.limit, args.failed)
     if args.cmd == "approve":
         return approve(repos, args.yes)
+    if args.cmd == "security":
+        return security(repos)
 
     ctx: dict = {"pick": pick, "now": getattr(args, "now", False), "ready": getattr(args, "ready", False)}
     keyfile = getattr(args, "keyfile", None) or getattr(args, "key", None)

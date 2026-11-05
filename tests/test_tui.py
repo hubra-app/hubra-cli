@@ -92,6 +92,15 @@ def test_keyboard_links_and_theme(env, monkeypatch):
             await pilot.pause(0.3)
             assert app.query_one("#tabs").active == "prs"
             assert app.focused is app.query_one("#prs-table")
+            await pilot.press("4")  # Security
+            await pilot.pause(0.3)
+            sec = app.query_one("#security-table")
+            assert [r.value for r in sec.rows][:3] == ["hubra-app/hubra-plugin-budgets", "hubra-app/hubra",
+                                                       "hubra-app/hubra-plugin-discord"]
+            assert str(app.query_one("#tabs").get_tab("security").label) == "Security (3)"
+            detail = str(app.query_one("#security-detail").render())
+            assert "critical" in detail and "SQL query built from user input" in detail
+            await pilot.press("2")
             assert "2 to approve" in app.sub_title  # discord signing + hubra outside contributor run
             await pilot.press("A")  # auto-merge all ready PRs
             await pilot.pause(0.3)
@@ -114,7 +123,7 @@ def test_keyboard_links_and_theme(env, monkeypatch):
             assert text.plain == "PR hubra-plugin-budgets/pull/12 done"
             meta = [span.style.meta for span in text.spans if hasattr(span.style, "meta")]
             assert meta == [{"@click": "app.open_link('https://github.com/hubra-app/hubra-plugin-budgets/pull/12')"}]
-            await pilot.press("4", "down")  # Checks › Repo settings
+            await pilot.press("5", "down")  # Checks › Repo settings
             await settle(pilot, app)
             assert "f applies the fixes" in str(app.query_one("#checks-detail").render())
             await pilot.press("f")

@@ -190,6 +190,23 @@ if argv[0] == "api":
         if key in LISTS:
             content(LISTS[key])
         fail("gh: Not Found (HTTP 404)")
+    if "/alerts" in rest:
+        kind = rest.split("/")[1]
+        alerts = {
+            ("hubra", "dependabot"): [{"number": 3, "html_url": f"https://github.com/{ORG}/hubra/security/dependabot/3",
+                                       "security_advisory": {"severity": "high", "summary": "ReDoS in parser"},
+                                       "dependency": {"package": {"name": "picomatch"},
+                                                      "manifest_path": "app/frontend/package-lock.json"}}],
+            ("hubra-plugin-budgets", "code-scanning"): [{"number": 1, "html_url": f"https://github.com/{ORG}/hubra-plugin-budgets/security/code-scanning/1",
+                                                         "rule": {"id": "py/sql-injection", "description": "SQL query built from user input",
+                                                                  "security_severity_level": "critical"},
+                                                         "most_recent_instance": {"location": {"path": "hubra_budgets/routes.py", "start_line": 42}}}],
+            ("hubra-plugin-discord", "secret-scanning"): [{"number": 1, "secret_type_display_name": "Discord Bot Token",
+                                                           "html_url": f"https://github.com/{ORG}/hubra-plugin-discord/security/secret-scanning/1"}],
+        }
+        if kind == "code-scanning" and repo == "hubra.club":
+            fail("gh: no analysis found (HTTP 404)")
+        out(alerts.get((repo, kind), []))
     if rest.startswith("/releases/assets/"):
         data = open(os.environ["FAKE_GH_ZIP"], "rb").read() if os.environ.get("FAKE_GH_ZIP") else b""
         if rest.endswith("/2"):

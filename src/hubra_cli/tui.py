@@ -7,11 +7,12 @@ Start it with `hubra tui`; it needs the [tui] extra (README › Install) or
   Pull requests  every open PR; the right side shows the selected one in depth
   Runs           runs waiting for your approval (signing, outside contributors),
                  then the newest run per repo; the tab and header show the count
+  Security       open Dependabot, secret-scanning and code-scanning alerts
   Checks         plugin lists against the releases, repo settings (doctor)
   Hubra          health, alerts, errors, jobs and token of the running Hubra
                  (needs a token: `hubra login` or HUBRA_TOKEN)
 
-Keys: ← → or 1-5 switch tabs · ↑ ↓ move · Enter or o open in browser · r refresh
+Keys: ← → or 1-6 switch tabs · ↑ ↓ move · Enter or o open in browser · r refresh
 · m auto-merge · M merge now · A auto-merge all ready PRs · v filter PRs
 (auto-merge, recently merged, drafts) · y mark ready · d diff · b bump
 · R release · S ship · a approve a waiting run · f fix drift and s sync files
@@ -55,7 +56,8 @@ from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 
 from hubra_cli import cli as g
 
-TABS = [("repos", "Repos"), ("prs", "Pull requests"), ("runs", "Runs"), ("checks", "Checks"), ("hubra", "Hubra")]
+TABS = [("repos", "Repos"), ("prs", "Pull requests"), ("runs", "Runs"), ("security", "Security"),
+        ("checks", "Checks"), ("hubra", "Hubra")]
 CHECKS = [("lists", "Plugin lists"), ("doctor", "Repo settings"), ("verify", "Release zips")]
 
 HUBRA_SECTIONS = [
@@ -240,8 +242,9 @@ class HubraTui(App):
         Binding("1", "tab('repos')", "Repos", show=False),
         Binding("2", "tab('prs')", "PRs", show=False),
         Binding("3", "tab('runs')", "Runs", show=False),
-        Binding("4", "tab('checks')", "Checks", show=False),
-        Binding("5", "tab('hubra')", "Hubra", show=False),
+        Binding("4", "tab('security')", "Security", show=False),
+        Binding("5", "tab('checks')", "Checks", show=False),
+        Binding("6", "tab('hubra')", "Hubra", show=False),
         Binding("r", "refresh", "Refresh"),
         Binding("o", "open", "Open"),
         Binding("t", "toggle_theme", "Light/dark", show=False),
@@ -272,6 +275,8 @@ class HubraTui(App):
         self.last_summary = ""
         self.last_waiting = 0
         self.pr_filter = "all"
+        self.alerts: dict[str, tuple[list[dict], list[str]]] = {}
+        self.last_alerts = 0
 
     # ── layout ────────────────────────────────────────────────────────────
 
@@ -295,6 +300,7 @@ class HubraTui(App):
             "repos": g.STATUS_HEAD,
             "prs": ["repo", "#", "title", "state", "checks"],
             "runs": ["repo", "state", "workflow", "ref", "when"],
+            "security": ["repo", "alerts", "worst", "kinds"],
             "checks": ["check"],
             "hubra": ["view"],
         }
@@ -306,10 +312,11 @@ class HubraTui(App):
         checks = self.query_one("#checks-table", DataTable)
         for key, label in CHECKS:
             checks.add_row(label, key=key)
-        self.log_line("Loading … ← → or 1-5 switch tabs, ↑ ↓ move, Enter opens, r refreshes, q quits")
+        self.log_line("Loading … ← → or 1-6 switch tabs, ↑ ↓ move, Enter opens, r refreshes, q quits")
         self.focus_table()
         self.load_github()
         self.load_runs()
+        self.load_security()
         self.set_interval(120, self.action_refresh)
 
     def log_line(self, text: str) -> None:
@@ -462,6 +469,56 @@ class HubraTui(App):
                 "Pull requests" + (f" ({label})" if self.pr_filter != "all" else "")
                 + (f" · {auto} auto-merging" if auto else ""))
 
+    @work(thread=True, exclusive=True, group="security")
+    def load_security(self) -> None:
+        try:
+            repos = self.repos or [g.full(c) for c in g.CORE] + [g.full(n) for n in g.plugin_names()]
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(g.WORKERS) as pool:
+                found = dict(zip(repos, pool.map(g.repo_alerts, repos)))
+        except RuntimeError as err:
+            self.call_from_thread(self.log_line, f"Security: {err}")
+            return
+        self.call_from_thread(self.fill_security, found)
+
+    def fill_security(self, found: dict) -> None:
+        with contextlib.suppress(NoMatches):
+            self.alerts = found
+            table = self.query_one("#security-table", DataTable)
+            keep = self.current_key("security")
+            table.clear()
+            rank = g.SEVERITY_ORDER
+            rows = sorted(found.items(), key=lambda kv: (rank.get(kv[1][0][0]["severity"], 5) if kv[1][0] else 9,
+                                                          -len(kv[1][0]), kv[0]))
+            for repo, (alerts, unread) in rows:
+                worst = alerts[0]["severity"] if alerts else ("?" if unread else "-")
+                style = DANGER if worst in ("critical", "high", "secret") else WARNING if alerts else ""
+                kinds = ", ".join(sorted({a["kind"] for a in alerts})) or ("can't read all" if unread else "")
+                table.add_row(g.short(repo).removeprefix(g.PREFIX), Text(str(len(alerts)), style=style),
+                              Text(worst, style=style), kinds, key=repo)
+            self.restore(table, keep)
+            total = sum(len(a) for a, _ in found.values())
+            self.query_one("#tabs", TabbedContent).get_tab("security").label = (
+                f"Security ({total})" if total else "Security")
+            if total and total != self.last_alerts:
+                self.log_line(f"{total} open security alert(s): Security tab (4)")
+            self.last_alerts = total
+            self.update_detail()
+
+    def security_text(self, repo: str) -> str:
+        alerts, unread = self.alerts.get(repo, ([], []))
+        lines = [repo, f"{g.WEB}/{repo}/security", ""]
+        for a in alerts:
+            lines.append(f"{a['severity']:<9} {a['kind']:<16} {a['title']}")
+            if a["where"]:
+                lines.append(f"{'':<26} {a['where']}")
+            lines.append(f"{'':<26} {a['url']}")
+        if not alerts:
+            lines.append("No open alerts.")
+        if unread:
+            lines += ["", "Couldn't read:"] + [f"  {u}" for u in unread]
+        return "\n".join(lines)
+
     def action_pr_filter(self) -> None:
         order = [k for k, _ in PR_FILTERS]
         self.pr_filter = order[(order.index(self.pr_filter) + 1) % len(order)]
@@ -554,6 +611,8 @@ class HubraTui(App):
             else:
                 self.show("prs", "Loading …")
                 self.load_pr(key)
+        elif tab == "security":
+            self.show("security", self.security_text(key))
         elif tab == "runs":
             repo, run, envs = self.runs[key]
             lines = [f"{g.short(repo)}  {run.get('name')}", run["html_url"], "",
@@ -622,6 +681,7 @@ class HubraTui(App):
         self.detail_cache.clear()
         self.load_github()
         self.load_runs()
+        self.load_security()
         if self.tab() in ("hubra", "checks"):
             self.update_detail()
 
@@ -635,6 +695,9 @@ class HubraTui(App):
             url = self.prs[key]["url"]
         elif tab == "runs":
             url = self.runs[key][1]["html_url"]
+        elif tab == "security":
+            alerts = self.alerts.get(key, ([], []))[0]
+            url = alerts[0]["url"] if len(alerts) == 1 else f"{g.WEB}/{key}/security"
         elif tab == "checks":
             docs = f"{g.WEB}/{g.ORG}/hubra/blob/main/docs/plugin-releases.md"
             url = docs if key == "lists" else f"{g.WEB}/{g.TEMPLATE}"
@@ -741,6 +804,8 @@ class HubraTui(App):
             ("Set up plugin repo", "copy the template, create the plugin-signing environment", self.action_setup),
             ("Store signing key", "HUBRA_SIGNING_KEY for the selected plugin", self.action_store_key),
             ("Hubra login", "save a Hubra API token for the Hubra tab", self.action_login),
+            ("Security alerts", "4 · open Dependabot, secret and code scanning alerts",
+             lambda: self.action_tab("security")),
             ("Verify release zips", "Checks › Release zips", lambda: self.show_check("verify")),
             ("Check plugin lists", "Checks › Plugin lists", lambda: self.show_check("lists")),
             ("Check repo settings", "Checks › Repo settings (doctor)", lambda: self.show_check("doctor")),

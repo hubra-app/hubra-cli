@@ -223,3 +223,11 @@ def test_check_zip_signature(tmp_path):
         make(files, {"demo/__init__.py": b"evil()\n"}), "v1.2.0", pub)
     assert "tag v1.3.0 but plugin.yaml version 1.2.0" in cli.check_zip(make(files), "v1.3.0", pub)
     assert any("not Hubra.pub" in p for p in cli.check_zip(make(files), "v1.2.0"))  # the real key
+
+
+def test_security_alerts(env):
+    out = hubra(env, "security", "hubra", "budgets", "discord", "hubra.club")
+    assert "high      Dependabot       picomatch: ReDoS in parser  app/frontend/package-lock.json" in out
+    assert "critical  code scanning    SQL query built from user input  hubra_budgets/routes.py:42" in out
+    assert "secret    secret scanning  Discord Bot Token" in out
+    assert "== hubra-app/hubra.club\n   no open alerts" in out  # no code scanning set up: not an error

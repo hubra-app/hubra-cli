@@ -42,6 +42,7 @@ hubra lists                   # plugin lists vs releases (--fix opens PRs)
 hubra doctor                  # repos that drifted from the template (--fix applies it)
 hubra sync                    # PRs that copy the template's shared files to plugins
 hubra verify                  # check the latest release zips against Hubra.pub
+hubra security                # open Dependabot, secret- and code-scanning alerts
 hubra setup                   # create new plugin repos, copy the template's setup
 hubra key signing.key         # store the plugin signing key
 hubra login                   # save a Hubra API token
@@ -114,9 +115,9 @@ point at another install.
 
 ## TUI keys
 
-Tabs: Repos, Pull requests, Runs, Checks (plugin lists and doctor) and Hubra,
+Tabs: Repos, Pull requests, Runs, Security (open alerts), Checks (plugin lists, doctor, release zips) and Hubra,
 in the Hubra colours (`t` switches to the light theme).
-`←` `→` or `1`-`5` switch tabs and `↑` `↓` move right away · `Enter` or `o` open in
+`←` `→` or `1`-`6` switch tabs and `↑` `↓` move right away · `Enter` or `o` open in
 the browser · `r` refresh · `m` auto-merge · `M` merge now · `y` mark ready ·
 `A` auto-merge all ready PRs · `d` diff · `R` release · `a` approve a waiting run (signing or an outside contributor's run; the Runs tab and the header show how many wait) · `q` quit. Links in the detail
 pane and the log are short labels you can click. Every change asks first;
