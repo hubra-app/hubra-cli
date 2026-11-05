@@ -95,9 +95,12 @@ def test_keyboard_links_and_theme(env, monkeypatch):
             await pilot.pause(0.3)
             assert app.query_one("#tabs").active == "prs"
             assert app.focused is app.query_one("#prs-table")
-            await pilot.press("4")  # Security
-            await pilot.pause(0.3)
+            await pilot.press("4")  # Security loads when its tab opens
             sec = app.query_one("#security-table")
+            for _ in range(40):
+                await pilot.pause(0.25)
+                if sec.row_count:
+                    break
             assert [r.value for r in sec.rows][:3] == ["hubra-app/hubra-plugin-budgets", "hubra-app/hubra",
                                                        "hubra-app/hubra-plugin-discord"]
             assert str(app.query_one("#tabs").get_tab("security").label) == "Security (3)"
