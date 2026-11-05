@@ -5,17 +5,18 @@ Start it with `hubra tui`; it needs the [tui] extra (README › Install) or
 
   Repos          version on main, latest release, what's left to release, PRs, CI
   Pull requests  every open PR; the right side shows the selected one in depth
-  Runs           signing runs waiting for you, then the newest run per repo
+  Runs           runs waiting for your approval (signing, outside contributors),
+                 then the newest run per repo; the tab and header show the count
   Checks         plugin lists against the releases, repo settings (doctor)
   Hubra          health, alerts, errors, jobs and token of the running Hubra
                  (needs a token: `hubra login` or HUBRA_TOKEN)
 
-Keys: 1-5 switch tabs · arrows move · Enter or o open in browser · r refresh
-· m auto-merge · M merge now · y mark ready · d diff · R release · a approve
-signing · f fix drift and s sync files (Checks › Repo settings) · t light/dark
-· q quit. Links in the detail pane and the log open on
-click. Every action that changes something asks first; with --dry-run it only
-shows what it would do.
+Keys: ← → or 1-5 switch tabs · ↑ ↓ move · Enter or o open in browser · r refresh
+· m auto-merge · M merge now · A auto-merge all ready PRs · y mark ready
+· d diff · R release · a approve a waiting run · f fix drift and s sync files
+(Checks › Repo settings) · t light/dark · q quit. Links in the detail pane
+and the log open on click. Every action that changes something asks first;
+with --dry-run it only shows what it would do.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 
 from hubra_cli import cli as g
 
+TABS = [("repos", "Repos"), ("prs", "Pull requests"), ("runs", "Runs"), ("checks", "Checks"), ("hubra", "Hubra")]
 CHECKS = [("lists", "Plugin lists"), ("doctor", "Repo settings"), ("verify", "Release zips")]
 
 HUBRA_SECTIONS = [
@@ -173,6 +175,8 @@ class HubraTui(App):
         scrollbar-color: $primary 40%; scrollbar-color-hover: $primary 70%; scrollbar-color-active: $primary; }
     """
     BINDINGS: ClassVar = [
+        Binding("left", "next_tab(-1)", "Prev tab", show=False, priority=True),
+        Binding("right", "next_tab(1)", "Next tab", show=False, priority=True),
         Binding("1", "tab('repos')", "Repos", show=False),
         Binding("2", "tab('prs')", "PRs", show=False),
         Binding("3", "tab('runs')", "Runs", show=False),
@@ -183,6 +187,7 @@ class HubraTui(App):
         Binding("t", "toggle_theme", "Light/dark", show=False),
         Binding("m", "merge(False)", "Auto-merge"),
         Binding("M", "merge(True)", "Merge now"),
+        Binding("A", "merge_all", "Auto-merge all"),
         Binding("y", "ready", "Ready"),
         Binding("d", "diff", "Diff"),
         Binding("R", "release", "Release"),
@@ -209,8 +214,7 @@ class HubraTui(App):
     def compose(self) -> ComposeResult:
         yield Header()
         with TabbedContent(id="tabs"):
-            for tab_id, title in (("repos", "Repos"), ("prs", "Pull requests"),
-                                  ("runs", "Runs"), ("checks", "Checks"), ("hubra", "Hubra")):
+            for tab_id, title in TABS:
                 with TabPane(title, id=tab_id), Horizontal(classes="split"):
                     yield DataTable(id=f"{tab_id}-table", cursor_type="row", zebra_stripes=True)
                     with VerticalScroll(classes="detail", can_focus=False):
@@ -238,7 +242,7 @@ class HubraTui(App):
         checks = self.query_one("#checks-table", DataTable)
         for key, label in CHECKS:
             checks.add_row(label, key=key)
-        self.log_line("Loading … 1-5 switch tabs, arrows move, Enter opens, r refreshes, q quits")
+        self.log_line("Loading … ← → or 1-5 switch tabs, ↑ ↓ move, Enter opens, r refreshes, q quits")
         self.focus_table()
         self.load_github()
         self.load_runs()
@@ -260,6 +264,13 @@ class HubraTui(App):
     def highlight(self) -> str:
         """Signal Gold on the dark theme; deep violet on the light one (gold needs ink behind it)."""
         return VIOLET[7] if self.theme == "hubra-light" else GOLD
+
+    def action_next_tab(self, step: int) -> None:
+        if not isinstance(self.screen, ModalScreen):
+            order = [t for t, _ in TABS]
+            self.action_tab(order[(order.index(self.tab()) + step) % len(order)])
+        else:  # in a confirm dialog the arrows move between Yes and No
+            self.screen.focus_next() if step > 0 else self.screen.focus_previous()
 
     def action_toggle_theme(self) -> None:
         self.theme = "hubra-light" if self.theme == "hubra" else "hubra"
@@ -343,9 +354,8 @@ class HubraTui(App):
     @work(thread=True, exclusive=True, group="runs")
     def load_runs(self) -> None:
         try:
-            plugins = [r for r in self.repos or [g.full(n) for n in g.plugin_names()] if g.is_plugin(r)]
-            waiting = g.all_waiting(plugins)
-            repos = self.repos or [g.full(c) for c in g.CORE] + plugins
+            repos = self.repos or [g.full(c) for c in g.CORE] + [g.full(n) for n in g.plugin_names()]
+            waiting = g.all_waiting(repos)
 
             def latest(repo):
                 runs = (g.api("GET", f"/repos/{repo}/actions/runs?per_page=1") or {}).get("workflow_runs") or []
@@ -386,8 +396,13 @@ class HubraTui(App):
                           run.get("head_branch") or "", g.ago(run.get("created_at")), key=key)
         self.restore(table, keep)
         if len(waiting) != self.last_waiting and waiting:
-            self.log_line(f"{len(waiting)} run(s) wait for your signing approval: Runs tab, key a")
+            self.log_line(f"{len(waiting)} run(s) wait for your approval: Runs tab (3), key a")
         self.last_waiting = len(waiting)
+        base = "dry run: nothing changes" if self.dry_run else "hubra-app"
+        self.sub_title = f"{base} · {len(waiting)} to approve (3, a)" if waiting else base
+        with contextlib.suppress(NoMatches):
+            tabs = self.query_one("#tabs", TabbedContent)
+            tabs.get_tab("runs").label = f"Runs ({len(waiting)} to approve)" if waiting else "Runs"
         self.update_detail()
 
     @staticmethod
@@ -562,11 +577,32 @@ class HubraTui(App):
             what = f"{'Merge now' if now else 'Auto-merge'} every ready PR in {g.short(repo)}?"
         self.confirm_then(what, g.merge, repo, ctx)
 
+    def action_merge_all(self) -> None:
+        ready = [p for p in self.prs.values() if not p["isDraft"] and p.get("mergeable") != "CONFLICTING"
+                 and not p.get("autoMergeRequest")]
+        if not ready:
+            self.log_line("No ready PRs without auto-merge (drafts and conflicts are left alone)")
+            return
+        pick: dict[str, list[int]] = {}
+        for p in ready:
+            pick.setdefault(p["repo"], []).append(p["number"])
+        names = "\n".join(f"  {g.short(p['repo']).removeprefix(g.PREFIX)}#{p['number']} {p['title'][:60]}"
+                          for p in ready[:15]) + (f"\n  … and {len(ready) - 15} more" if len(ready) > 15 else "")
+
+        def merge_all(pick: dict[str, list[int]]) -> None:
+            g.for_each(list(pick), g.merge, {"pick": pick, "now": False, "ready": False})
+        self.confirm_then(f"Turn on auto-merge for {len(ready)} ready PR(s)? Each merges once its checks pass.\n\n"
+                          f"{names}", merge_all, pick)
+
     def action_ready(self) -> None:
         key = self.current_key()
-        if self.tab() != "prs" or not key or not self.prs[key]["isDraft"]:
+        if self.tab() != "prs" or not key:
+            self.log_line("y marks a draft PR ready: pick one in the Pull requests tab (2)")
             return
         p = self.prs[key]
+        if not p["isDraft"]:
+            self.log_line(f"{g.short(p['repo'])}#{p['number']} is already ready for review")
+            return
 
         def ready(repo: str, number: int) -> None:
             if g.DRY_RUN:
@@ -596,6 +632,7 @@ class HubraTui(App):
     def action_approve(self) -> None:
         key = self.current_key()
         if self.tab() != "runs" or not key:
+            self.log_line("a approves a run waiting for you: Runs tab (3)")
             return
         repo, run, envs = self.runs[key]
         if not envs:
@@ -608,8 +645,14 @@ class HubraTui(App):
             else:
                 g.approve_run(repo, run, envs)
                 g.say(f"approved {', '.join(e['name'] for e in envs)} for {g.short(repo)} {run.get('head_branch')}")
-        self.confirm_then(f"Approve signing of {g.short(repo)} {run.get('head_branch')}?\n"
-                          f"This signs the plugin with the official key.", approve, repo, run, envs)
+        if g.RUN_APPROVAL in envs:
+            question = (f"Let {g.short(repo)} run {run.get('name')} on {run.get('head_branch')}?\n"
+                        "It comes from an outside contributor: check the PR's changes first.\n"
+                        f"{run.get('html_url')}")
+        else:
+            question = (f"Approve {', '.join(e['name'] for e in envs)} for {g.short(repo)} "
+                        f"{run.get('head_branch')}?\nThis signs the plugin with the official key.")
+        self.confirm_then(question, approve, repo, run, envs)
 
 
 def run(dry_run: bool = False) -> None:

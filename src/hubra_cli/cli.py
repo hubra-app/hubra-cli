@@ -643,7 +643,13 @@ def key_only(repo: str, ctx: dict) -> None:
 # ── approve ──────────────────────────────────────────────────────────────────
 
 
+# A run of an outside contributor's PR waits for "Approve and run" (status
+# action_required); this marks it among the environments a run waits for.
+RUN_APPROVAL = {"id": None, "name": "approval to run (outside contributor)"}
+
+
 def waiting_runs(repo: str) -> list[tuple[str, dict, list[dict]]]:
+    """Runs waiting for you: signing (an environment you review) and outside contributors' runs."""
     out = []
     runs = api("GET", f"/repos/{repo}/actions/runs?status=waiting&per_page=20") or {}
     for run in runs.get("workflow_runs") or []:
@@ -651,15 +657,22 @@ def waiting_runs(repo: str) -> list[tuple[str, dict, list[dict]]]:
         envs = [p["environment"] for p in pending if p.get("current_user_can_approve")]
         if envs:
             out.append((repo, run, envs))
+    runs = api("GET", f"/repos/{repo}/actions/runs?status=action_required&per_page=20") or {}
+    for run in runs.get("workflow_runs") or []:
+        out.append((repo, run, [RUN_APPROVAL]))
     return out
 
 
 def approve_run(repo: str, run: dict, envs: list[dict]) -> None:
-    api("POST", f"/repos/{repo}/actions/runs/{run['id']}/pending_deployments", {
-        "environment_ids": [e["id"] for e in envs],
-        "state": "approved",
-        "comment": "Approved with the hubra CLI",
-    })
+    if RUN_APPROVAL in envs:
+        api("POST", f"/repos/{repo}/actions/runs/{run['id']}/approve")
+    ids = [e["id"] for e in envs if e is not RUN_APPROVAL and e.get("id") is not None]
+    if ids:
+        api("POST", f"/repos/{repo}/actions/runs/{run['id']}/pending_deployments", {
+            "environment_ids": ids,
+            "state": "approved",
+            "comment": "Approved with the hubra CLI",
+        })
 
 
 def all_waiting(repos: list[str]) -> list[tuple[str, dict, list[dict]]]:
@@ -1849,7 +1862,7 @@ def main() -> None:
             sys.exit(f"Unknown: {', '.join(unknown)}")
         if pick and args.cmd not in ("merge", "ship"):
             sys.exit("name#12 works with merge, ship, pr and open")
-    elif args.cmd in ("status", "prs", "runs", "doctor"):
+    elif args.cmd in ("status", "prs", "runs", "doctor", "approve"):
         repos = [full(c) for c in CORE] + [full(n) for n in plugins]
     else:
         repos = [full(n) for n in plugins]

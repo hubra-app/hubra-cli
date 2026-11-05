@@ -32,6 +32,8 @@ def test_tui_flow(env, monkeypatch):
             await pilot.pause(1.5)
             app.query_one("#tabs").active = "runs"
             await pilot.pause(0.5)
+            runs = app.query_one("#runs-table")
+            runs.move_cursor(row=runs.get_row_index("hubra-app/hubra-plugin-discord|555"))
             await pilot.press("a")
             await pilot.pause(0.3)
             await pilot.press("y")
@@ -77,10 +79,30 @@ def test_keyboard_links_and_theme(env, monkeypatch):
             assert app.focused is table  # arrows work without a click first
             await pilot.press("down", "down")
             assert table.cursor_row == 2
+            await pilot.press("right")
+            await pilot.pause(0.3)
+            assert app.query_one("#tabs").active == "prs"
+            await pilot.press("left", "left")
+            await pilot.pause(0.3)
+            assert app.query_one("#tabs").active == "hubra"  # wraps around
             await pilot.press("2")
             await pilot.pause(0.3)
             assert app.query_one("#tabs").active == "prs"
             assert app.focused is app.query_one("#prs-table")
+            assert "2 to approve" in app.sub_title  # discord signing + hubra outside contributor run
+            await pilot.press("A")  # auto-merge all ready PRs
+            await pilot.pause(0.3)
+            assert "Turn on auto-merge for 1 ready PR(s)" in str(app.screen.query_one("Label").render())
+            await pilot.press("y")
+            for _ in range(40):
+                await pilot.pause(0.25)
+                log = [str(line.text) for line in app.query_one("#log").lines]
+                if any("budgets-12" in line or "#12" in line for line in log):
+                    break
+            await pilot.press("y")  # the selected PR (hubra#190) is no draft: says so instead of nothing
+            await pilot.pause(0.2)
+            log = [str(line.text) for line in app.query_one("#log").lines]
+            assert any("is already ready for review" in line for line in log), log
             await pilot.press("1", "enter")
             await pilot.pause(0.3)
             assert opened and opened[-1].startswith("https://github.com/hubra-app/")

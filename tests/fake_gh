@@ -242,6 +242,11 @@ if argv[0] == "api":
     if "/pending_deployments" in rest:
         out([{"environment": {"id": 77, "name": "plugin-signing"}, "current_user_can_approve": True}])
     if rest.startswith("/actions/runs"):
+        if "status=action_required" in rest:
+            runs = [{"id": 777, "name": "CI", "head_branch": "fork-fix", "status": "action_required",
+                     "created_at": "2026-11-05T08:00:00Z",
+                     "html_url": f"https://github.com/{ORG}/{repo}/actions/runs/777"}] if repo == "hubra" else []
+            out({"workflow_runs": runs})
         if "status=waiting" in rest:
             runs = [{"id": 555, "name": "Test and release", "head_branch": "v2.5.0", "status": "waiting",
                      "created_at": "2026-11-05T07:00:00Z",

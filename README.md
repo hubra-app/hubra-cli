@@ -107,9 +107,9 @@ point at another install.
 
 Tabs: Repos, Pull requests, Runs, Checks (plugin lists and doctor) and Hubra,
 in the Hubra colours (`t` switches to the light theme).
-`1`-`5` switch tabs and the arrow keys move right away · `Enter` or `o` open in
+`←` `→` or `1`-`5` switch tabs and `↑` `↓` move right away · `Enter` or `o` open in
 the browser · `r` refresh · `m` auto-merge · `M` merge now · `y` mark ready ·
-`d` diff · `R` release · `a` approve signing · `q` quit. Links in the detail
+`A` auto-merge all ready PRs · `d` diff · `R` release · `a` approve a waiting run (signing or an outside contributor's run; the Runs tab and the header show how many wait) · `q` quit. Links in the detail
 pane and the log are short labels you can click. Every change asks first;
 `hubra tui --dry-run` only shows what it would do.
 
