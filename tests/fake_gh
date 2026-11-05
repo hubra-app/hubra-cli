@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Stand-in for gh: canned answers for a made-up hubra-app org, logs every call.
+
+    PATH=$PWD/tests:$PATH  (with this file linked as `gh`)  python hubra_gh.py status
+FAKE_GH_DELAY sets the pause per call (default 0.3 s, roughly a real gh call);
+FAKE_GH_LOG names a file that gets one line per call.
+"""
+import json, os, re, sys, time, base64
+
+LOG = os.environ.get("FAKE_GH_LOG", "/dev/null")
+DELAY = float(os.environ.get("FAKE_GH_DELAY", "0.3"))
+argv = sys.argv[1:]
+stdin = sys.stdin.read() if ("--input" in argv or argv[:2] == ["secret", "set"]) else ""
+with open(LOG, "a") as f:
+    f.write(" ".join(argv) + "\n")
+time.sleep(DELAY)
+ORG = "hubra-app"
+
+PLUGINS = {  # name: (plugin.yaml id, version or None, releases)
+    "budgets": ("budgets", "1.2.0", ["v1.1.0", "v1.0.0"]),
+    "discord": ("discord", "2.5.0", ["v2.5.0", "v2.4.0"]),
+    "board": ("example", "0.1.0", []),
+    "keys": (None, None, []),
+}
+for n in ["bank-import", "guides", "imap-inbox", "codes", "inventory", "documents", "payments",
+          "kasse", "supporters", "booking", "teams", "community", "forms", "letters",
+          "messengers", "assistant"]:
+    PLUGINS[n] = (n, "1.0.0", ["v1.0.0"])
+REPOS = ["hubra", "hubra.club", "hubra-plugins", "hubra-plugins-template"] + [f"hubra-plugin-{n}" for n in PLUGINS]
+
+PRS = {
+    "hubra-plugin-budgets": [
+        dict(number=12, title="Bump to 1.2.0", isDraft=False, mergeable="MERGEABLE", autoMergeRequest=None, state="OPEN"),
+        dict(number=13, title="WIP: charts", isDraft=True, mergeable="MERGEABLE", autoMergeRequest=None, state="OPEN"),
+        dict(number=14, title="Conflicting change", isDraft=False, mergeable="CONFLICTING", autoMergeRequest=None, state="OPEN"),
+    ],
+    "hubra": [dict(number=190, title="Fix roles seed", isDraft=False, mergeable="MERGEABLE",
+                   autoMergeRequest={"enabledAt": "x"}, state="OPEN"),
+              dict(number=150, title="Old", isDraft=False, mergeable="MERGEABLE", autoMergeRequest=None, state="MERGED")],
+}
+for repo, prs in PRS.items():
+    for p in prs:
+        p["url"] = f"https://github.com/{ORG}/{repo}/pull/{p['number']}"
+
+
+def out(obj):
+    print(json.dumps(obj))
+    sys.exit(0)
+
+
+def fail(msg, code=1):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def plugin_of(repo):
+    return PLUGINS.get(repo.split("/")[-1].removeprefix("hubra-plugin-")) if "hubra-plugin-" in repo else None
+
+
+def yaml(p):
+    return f"id: {p[0]}\nname: X\nversion: \"{p[1]}\"\n" if p and p[0] else None
+
+
+def repo_node(name, full):
+    node = {"name": name, "isArchived": False}
+    if not full:
+        return node
+    p = plugin_of(name)
+    prs = [x for x in PRS.get(name, []) if x["state"] == "OPEN"]
+    node.update({
+        "defaultBranchRef": {"name": "main", "target": {"statusCheckRollup": {"state": "SUCCESS" if name != "hubra-plugin-codes" else "FAILURE"}}},
+        "manifest": {"text": yaml(p)} if yaml(p) else None,
+        "releases": {"nodes": [{"tagName": t} for t in (p[2] if p else ["v1.4.0"] if name == "hubra" else [])]},
+        "pullRequests": {"totalCount": len(prs), "nodes": [dict(x, reviewDecision=None, headRefName="feat",
+                                                                author={"login": "reykimedev"},
+                                                                commits={"nodes": [{"commit": {"statusCheckRollup": {"state": "PENDING"}}}]})
+                                                           for x in prs]},
+    })
+    return node
+
+
+if argv[:2] == ["auth", "status"]:
+    sys.exit(0)
+
+if argv[:2] == ["api", "graphql"]:
+    body = json.loads(stdin)
+    full = "statusCheckRollup" in body["query"]
+    cursor = body["variables"].get("cursor")
+    size = 25 if full else 100
+    start = int(cursor or 0)
+    page = REPOS[start:start + size]
+    out({"data": {"organization": {"repositories": {
+        "pageInfo": {"hasNextPage": start + size < len(REPOS), "endCursor": str(start + size)},
+        "nodes": [repo_node(n, full) for n in page]}}}})
+
+if argv[0] == "api":
+    method = argv[argv.index("-X") + 1]
+    path = argv[argv.index("-X") + 2]
+    if method != "GET":
+        out({})
+    m = re.match(r"/repos/[^/]+/([^/?]+)(.*)", path)
+    if path == "/user":
+        out({"id": 36863848, "login": "reykimedev"})
+    repo, rest = m.group(1), m.group(2)
+    p = plugin_of(repo)
+    if rest == "":
+        out({"default_branch": "main"})
+    if rest.startswith("/contents/plugin.yaml"):
+        y = yaml(p)
+        if not y:
+            fail("HTTP 404: Not Found")
+        out({"content": base64.b64encode(y.encode()).decode()})
+    if rest.startswith("/contents/.github/rulesets/"):
+        out({"content": base64.b64encode(json.dumps({"name": rest.split("/")[-1][:-5]}).encode()).decode()})
+    if rest.startswith("/releases"):
+        out([{"tag_name": t} for t in (p[2] if p else [])])
+    if rest.startswith("/compare/"):
+        out({"ahead_by": 12})
+    if rest.startswith("/rulesets"):
+        out([{"name": "main", "id": 1}])
+    if "/pending_deployments" in rest:
+        out([{"environment": {"id": 77, "name": "plugin-signing"}, "current_user_can_approve": True}])
+    if rest.startswith("/actions/runs"):
+        if "status=waiting" in rest:
+            runs = [{"id": 555, "name": "Test and release", "head_branch": "v2.5.0", "status": "waiting",
+                     "created_at": "2026-11-05T07:00:00Z",
+                     "html_url": f"https://github.com/{ORG}/{repo}/actions/runs/555"}] if repo == "hubra-plugin-discord" else []
+        else:
+            tag = f"v{p[1]}" if p and p[1] else "main"
+            runs = [{"id": 9, "name": "Test and release", "event": "release", "head_branch": tag,
+                     "status": "completed", "conclusion": "success" if repo != "hubra-plugin-codes" else "failure",
+                     "created_at": "2026-11-04T20:00:00Z",
+                     "html_url": f"https://github.com/{ORG}/{repo}/actions/runs/9"}]
+        out({"workflow_runs": runs})
+    fail(f"HTTP 404: no fake for {path}")
+
+if argv[:2] == ["repo", "list"]:
+    out([{"name": n} for n in REPOS])
+if argv[:2] == ["repo", "view"]:
+    name = argv[2].split("/")[-1]
+    sys.exit(0 if name in REPOS else 1)
+
+if argv[0] == "pr":
+    repo = argv[argv.index("--repo") + 1].split("/")[-1]
+    if argv[1] == "list":
+        out([p for p in PRS.get(repo, []) if p["state"] == "OPEN"])
+    if argv[1] == "view":
+        n = int(argv[2])
+        p = next((p for p in PRS.get(repo, []) if p["number"] == n), None)
+        if not p:
+            fail(f"GraphQL: Could not resolve to a PullRequest with the number of {n}.")
+        if "--web" in argv:
+            sys.exit(0)
+        out(dict(p, author={"login": "reykimedev"}, baseRefName="main", headRefName="feat/x",
+                 createdAt="2026-11-03T10:00:00Z", updatedAt="2026-11-05T07:30:00Z",
+                 mergeStateStatus="BLOCKED", reviewDecision="REVIEW_REQUIRED", additions=40, deletions=12,
+                 changedFiles=2, labels=[{"name": "release"}],
+                 files=[{"path": "plugin.yaml", "additions": 1, "deletions": 1},
+                        {"path": "backend/budgets.py", "additions": 39, "deletions": 11}],
+                 commits=[{"oid": "abcdef1234567", "messageHeadline": "Bump to 1.2.0"}],
+                 statusCheckRollup=[
+                     {"__typename": "CheckRun", "name": "test", "workflowName": "Test and release",
+                      "status": "COMPLETED", "conclusion": "FAILURE",
+                      "detailsUrl": f"https://github.com/{ORG}/{repo}/actions/runs/1/job/2"},
+                     {"__typename": "CheckRun", "name": "lint", "workflowName": "Test and release",
+                      "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://x"}],
+                 reviews=[{"author": {"login": "someone"}, "state": "CHANGES_REQUESTED", "body": "pls"}],
+                 body="Bumps budgets to 1.2.0.\n\nCloses #3"))
+    if argv[1] in ("merge", "ready"):
+        sys.exit(0)
+    if argv[1] == "diff":
+        print("diff --git a/plugin.yaml b/plugin.yaml\n-version: 1.1.0\n+version: 1.2.0")
+        sys.exit(0)
+
+if argv[:2] == ["release", "create"]:
+    sys.exit(0)
+if argv[:2] == ["secret", "set"]:
+    sys.exit(0)
+fail(f"fake gh: unhandled {argv}")

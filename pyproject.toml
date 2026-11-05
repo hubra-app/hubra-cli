@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hubra-cli"
+dynamic = ["version"]
+description = "The hubra command: GitHub and Hubra tools for the hubra-app repos, with a TUI"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+tui = ["textual>=1.0"]
+dev = ["pytest>=8", "ruff>=0.6", "textual>=1.0"]
+
+[project.scripts]
+hubra = "hubra_cli.cli:main"
+
+[tool.hatch.version]
+path = "src/hubra_cli/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hubra_cli"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "PLW1510", "RUF012"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
