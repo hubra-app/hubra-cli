@@ -120,6 +120,25 @@ def test_changelog_section():
     assert with_changelog_section(None, "1.0.0", []).startswith("# Changelog\n\n## 1.0.0\n\n- ")
 
 
+def test_core_bump_and_release(env, tmp_path):
+    out = hubra(env, "bump", "hubra", "--dry-run")
+    assert ("hubra 0.2.0 -> 0.3.0 (app/backend/pyproject.toml, app/backend/CHANGELOG.md, "
+            "app/backend/CHANGELOG.de.md)") in out
+    assert "[dry-run] branch bump/v0.3.0" in out
+    # main still says 0.2.0 with no [0.2.0] section: release refuses and says what to do
+    out = hubra(env, "release", "hubra", "--dry-run")
+    assert "has no [0.2.0] section" in out and "hubra bump hubra" in out
+
+
+def test_keep_a_changelog():
+    from hubra_cli.cli import keep_a_changelog
+
+    text = "# Changelog\n\n## [Unreleased]\n\n- a\n\n## [0.2.0] - 2026-11-01\n\n- b\n"
+    assert keep_a_changelog(text, "0.3.0", "2026-11-05") == (
+        "# Changelog\n\n## [Unreleased]\n\n## [0.3.0] - 2026-11-05\n\n- a\n\n## [0.2.0] - 2026-11-01\n\n- b\n")
+    assert keep_a_changelog(text, "0.2.0", "2026-11-05") is None
+
+
 def test_lists(env):
     out = hubra(env, "lists")
     assert "budgets      1.1.0     ok            shows 1.0.0" in out

@@ -45,7 +45,9 @@ merge    Turns on auto-merge (squash) for every open PR that isn't a draft:
          --ready first marks a named draft ready, --now merges right away
          instead of waiting (GitHub refuses while required checks are red).
          Prints each PR's link and its checks page.
-release  Reads plugin.yaml on the default branch. If v<version> has no
+release  Reads plugin.yaml (core: version in app/backend/pyproject.toml,
+         which needs its [x.y.z] section in app/backend/CHANGELOG.md) on the
+         default branch. If v<version> has no
          release and is newer than the latest, pushes the tag v<version>;
          release.yml then tests, signs (waits for your approval) and creates
          the release with the zip attached, so immutable releases work.
@@ -62,6 +64,8 @@ open     Opens a repo, name#12, or with --actions / --releases those pages.
 bump     Opens a PR on release/v<new> that sets plugin.yaml to the next
          version (minor by default; major, patch or 1.4.0) and adds a
          CHANGELOG.md section listing the PRs merged since the last release.
+         `bump hubra` opens it on bump/v<new>: pyproject.toml's version, and
+         [Unreleased] of both changelogs moved to [<new>] - <today>.
          --auto-merge merges it once checks pass; then `release` publishes.
 sync     Opens one PR per plugin that copies the template's shared files
          (SYNC_FILES: release.yml, rulesets, PR template, SECURITY.md, ...)
@@ -276,6 +280,7 @@ query($org: String!, $cursor: String) {
         name isArchived
         defaultBranchRef { name target { ... on Commit { statusCheckRollup { state } } } }
         manifest: object(expression: "HEAD:plugin.yaml") { ... on Blob { text } }
+        pyproject: object(expression: "HEAD:app/backend/pyproject.toml") { ... on Blob { text } }
         releases(first: 30, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { tagName } }
         pullRequests(states: OPEN, first: 30, orderBy: {field: UPDATED_AT, direction: DESC}) {
           totalCount
@@ -577,7 +582,7 @@ def release_run(repo: str, tag: str, wait: int = 0) -> dict | None:
 
 def run_state(run: dict) -> str:
     if run.get("status") == "waiting":
-        return "waiting for your approval (plugin-signing)"
+        return "waiting for your approval"
     return run.get("conclusion") or run.get("status") or "?"
 
 
@@ -602,8 +607,11 @@ def releases_on_tag_push(repo: str, branch: str) -> bool:
 
 
 def release(repo: str, ctx: dict) -> None:
+    if repo in CORE_VERSION:
+        release_core(repo, ctx)
+        return
     if not is_plugin(repo):
-        say("   not a plugin, skipped (core releases follow docs/release-guidelines.md)")
+        say("   not a plugin and has no version file, skipped")
         return
     branch = api("GET", f"/repos/{repo}")["default_branch"]
     m = manifest(repo, branch)
@@ -754,11 +762,9 @@ def status_rows(repos: list[str]) -> list[list[str]]:
             rows.append([short(repo), "missing", "", "", "", ""])
             continue
         m = parse_manifest((node.get("manifest") or {}).get("text")) if is_plugin(repo) else None
-        ver = m[1] if m and m[0] != "example" else ("template" if m else "-")
+        ver = node_version(repo, node) or ("template" if m else "-")
         last = newest([r["tagName"] for r in node["releases"]["nodes"]]) or "-"
-        todo = ""
-        if m and m[0] != "example" and (last == "-" or version_tuple(m[1]) > version_tuple(last)):
-            todo = f"v{m[1]}"
+        todo = to_release(repo, node)
         prs = node["pullRequests"]
         drafts = sum(p["isDraft"] for p in prs["nodes"])
         target = (node.get("defaultBranchRef") or {}).get("target") or {}
@@ -990,8 +996,11 @@ def with_changelog_section(text: str | None, version: str, lines: list[str]) -> 
 
 
 def bump(repo: str, ctx: dict) -> None:
+    if repo in CORE_VERSION:
+        bump_core(repo, ctx)
+        return
     if not is_plugin(repo):
-        say("   not a plugin, skipped")
+        say("   not a plugin and has no version file, skipped")
         return
     base = api("GET", f"/repos/{repo}")["default_branch"]
     found = get_file(repo, "plugin.yaml", base)
@@ -1036,6 +1045,141 @@ def bump(repo: str, ctx: dict) -> None:
                                "--squash", "--auto", "--delete-branch"],
                               capture_output=True, text=True, check=False)
         say("   auto-merge on" if proc.returncode == 0 else f"   auto-merge not set: {proc.stderr.strip()[:200]}")
+
+
+# ── core releases ────────────────────────────────────────────────────────────
+# Hubra itself releases like a plugin: its version is `version` in
+# app/backend/pyproject.toml, its release notes app/backend/CHANGELOG.md (Keep a
+# Changelog, with a German twin), and pushing the tag v<version> starts
+# release.yml, which checks both, builds the images and waits for the
+# `release` environment before it tags, signs and publishes them.
+
+CORE_VERSION = {f"{ORG}/hubra": ("app/backend/pyproject.toml",
+                                 ["app/backend/CHANGELOG.md", "app/backend/CHANGELOG.de.md"])}
+PYPROJECT_VERSION = re.compile(r'^(version\s*=\s*")([^"]+)(")', re.M)
+
+
+def core_version(repo: str, ref: str | None = None) -> tuple[str, str, str] | None:
+    """(version, file text, blob sha) of a core repo's version file."""
+    found = get_file(repo, CORE_VERSION[repo][0], ref)
+    m = PYPROJECT_VERSION.search(found[0]) if found else None
+    return (m.group(2), found[0], found[1]) if m else None
+
+
+def parse_core_version(text: str | None) -> str | None:
+    m = PYPROJECT_VERSION.search(text or "")
+    return m.group(2) if m else None
+
+
+def has_version(repo: str) -> bool:
+    """Plugins (plugin.yaml) and core repos with a version file: bump and release work on them."""
+    return is_plugin(repo) or repo in CORE_VERSION
+
+
+def node_version(repo: str, node: dict) -> str | None:
+    """The version on the default branch, from a GraphQL node with `manifest` and `pyproject`."""
+    if repo in CORE_VERSION:
+        return parse_core_version((node.get("pyproject") or {}).get("text"))
+    m = parse_manifest((node.get("manifest") or {}).get("text")) if is_plugin(repo) else None
+    return m[1] if m and m[0] != "example" else None
+
+
+def to_release(repo: str, node: dict) -> str:
+    """v<version> when the version on the default branch is newer than the latest release."""
+    ver = node_version(repo, node)
+    last = newest([r["tagName"] for r in (node.get("releases") or {}).get("nodes") or []])
+    return f"v{ver}" if ver and (not last or version_tuple(ver) > version_tuple(last)) else ""
+
+
+def keep_a_changelog(text: str, version: str, day: str) -> str | None:
+    """The [Unreleased] entries become `## [version] - day` under a new empty [Unreleased];
+    None when the version already has a section."""
+    if re.search(rf"^##\s*\[{re.escape(version)}\]", text, re.M):
+        return None
+    m = re.search(r"^##\s*\[Unreleased\][^\n]*\n", text, re.M | re.I)
+    if m:
+        return text[:m.end()] + f"\n## [{version}] - {day}\n" + text[m.end():]
+    m = re.search(r"^## ", text, re.M)
+    section = f"## [Unreleased]\n\n## [{version}] - {day}\n\n"
+    return text[:m.start()] + section + text[m.start():] if m else text.rstrip("\n") + "\n\n" + section
+
+
+def bump_core(repo: str, ctx: dict) -> None:
+    """PR on bump/v<new>: the next version in pyproject.toml, [Unreleased] moved to its section."""
+    base = api("GET", f"/repos/{repo}")["default_branch"]
+    path, changelogs = CORE_VERSION[repo]
+    found = core_version(repo, base)
+    if not found:
+        raise RuntimeError(f"no version in {path}")
+    cur, text, sha = found
+    new = next_version(cur, ctx["level"])
+    if version_tuple(new) <= version_tuple(cur):
+        raise RuntimeError(f"{new} is not newer than {cur} in {path}")
+    last = newest(release_tags(repo))
+    if last and version_tuple(cur) > version_tuple(last):
+        say(f"   note: {cur} in {path} isn't released yet (latest {last}); `hubra release hubra` would publish it")
+    files = {path: (PYPROJECT_VERSION.sub(rf"\g<1>{new}\g<3>", text, count=1), sha)}
+    day = time.strftime("%Y-%m-%d")
+    for cl_path in changelogs:
+        cl = get_file(repo, cl_path, base)
+        new_cl = keep_a_changelog(cl[0], new, day) if cl else None
+        if new_cl:
+            files[cl_path] = (new_cl, cl[1])
+    branch = f"bump/v{new}"  # not release/*: release.yml tags only commits on main or release/*
+    say(f"   hubra {cur} -> {new} ({path}" + "".join(f", {c}" for c in files if c != path) + ")")
+    if DRY_RUN:
+        say(f"   [dry-run] branch {branch}: version {new}, [Unreleased] -> [{new}] - {day}; PR 'Release {new}'")
+        return
+    body = (f"Sets `{path}` to {new} and moves the `[Unreleased]` entries of the changelogs to "
+            f"`[{new}] - {day}`.\n\nAfter the merge, `hubra release hubra` (or R in the TUI) pushes the tag "
+            f"v{new}. release.yml then runs the checks, builds the images and waits for your approval in the "
+            "`release` environment before it tags, signs and publishes them.")
+    url = open_pr(repo, base, branch, files, f"Release {new}", f"Release {new}", body)
+    say(f"   opened {url}")
+    if ctx.get("auto"):
+        proc = subprocess.run(["gh", "pr", "merge", url.rsplit("/", 1)[-1], "--repo", repo,
+                               "--squash", "--auto", "--delete-branch"],
+                              capture_output=True, text=True, check=False)
+        say("   auto-merge on" if proc.returncode == 0 else f"   auto-merge not set: {proc.stderr.strip()[:200]}")
+
+
+def release_core(repo: str, ctx: dict) -> None:
+    """Push the tag v<version in pyproject.toml> on the default branch, if it is new."""
+    branch = api("GET", f"/repos/{repo}")["default_branch"]
+    path, changelogs = CORE_VERSION[repo]
+    found = core_version(repo, branch)
+    if not found:
+        raise RuntimeError(f"no version in {path}")
+    ver = found[0]
+    tag, last = f"v{ver}", newest(release_tags(repo))
+    page = f"{WEB}/{repo}/releases/tag/{tag}"
+    if tag_exists(repo, tag):
+        run = release_run(repo, tag)
+        say(f"   {tag} is tagged" + (" and released" if last == tag else "; the release appears once you approve it"))
+        say(f"      {page}")
+        if run:
+            say(f"      release run: {run_state(run)}\n      {run['html_url']}")
+        return
+    if last and version_tuple(ver) <= version_tuple(last):
+        say(f"   {path} says {ver}, not newer than {last}: run `hubra bump hubra` first")
+        return
+    cl = get_file(repo, changelogs[0], branch)
+    if "-" not in ver and not (cl and re.search(rf"^##\s*\[{re.escape(ver)}\]", cl[0], re.M)):
+        say(f"   {changelogs[0]} has no [{ver}] section, so release.yml would stop: run `hubra bump hubra` first")
+        return
+    if DRY_RUN:
+        say(f"   [dry-run] push tag {tag} on {branch} (latest {last or 'none'})\n      would be {page}")
+        return
+    head = api("GET", f"/repos/{repo}/git/ref/heads/{branch}")["object"]["sha"]
+    api("POST", f"/repos/{repo}/git/refs", {"ref": f"refs/tags/{tag}", "sha": head})
+    say(f"   tagged {tag} on {branch} at {head[:7]} (was {last or 'none'})")
+    run = release_run(repo, tag, wait=20)
+    if run:
+        say(f"      release run: {run_state(run)}\n      {run['html_url']}")
+    else:
+        say(f"      release run not started yet: {WEB}/{repo}/actions/workflows/release.yml")
+    say("      it builds the images, then waits for you: approve the `release` environment there or with"
+        " `hubra approve hubra` (a in the TUI's Runs tab)")
 
 
 # Where the plugins are listed (docs/plugin-releases.md in hubra).
@@ -1903,7 +2047,7 @@ def main(argv: list[str] | None = None) -> None:
         if cmd == "runs":
             sp.add_argument("--limit", type=int, default=3)
             sp.add_argument("--failed", action="store_true")
-    sp = sub.add_parser("bump", help="open a PR that bumps a plugin's version and changelog")
+    sp = sub.add_parser("bump", help="open a PR that bumps a plugin's (or hubra's) version and changelog")
     sp.add_argument("name", help="plugin short name, e.g. budgets")
     sp.add_argument("level", nargs="?", default="minor", help="major, minor (default), patch or 1.4.0")
     sp.add_argument("--auto-merge", action="store_true", help="turn on auto-merge for the PR")
@@ -1958,7 +2102,7 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(str(err))
     if args.cmd == "bump":
         repo = full(args.name)
-        if repo not in {full(n) for n in plugin_names()}:
+        if repo not in CORE_VERSION and repo not in {full(n) for n in plugin_names()}:
             sys.exit(f"Unknown plugin: {args.name}")
         return for_each([repo], bump, {"level": args.level, "auto": args.auto_merge}, parallel=False)
 

@@ -686,9 +686,12 @@ class HubraTui(App):
         lines = [repo, f"{g.WEB}/{repo}", ""]
         if m:
             lines.append(f"plugin.yaml  {m[0]} {m[1]}")
+        elif repo in g.CORE_VERSION:
+            lines.append(f"version      {g.node_version(repo, node) or '-'}  ({g.CORE_VERSION[repo][0]})")
         lines.append(f"released     {last or '-'}" + (f"  {g.WEB}/{repo}/releases/tag/{last}" if last else ""))
-        if m and m[0] != "example" and (not last or g.version_tuple(m[1]) > g.version_tuple(last)):
-            lines.append(f"to release   v{m[1]}  (R releases it)")
+        todo = g.to_release(repo, node)
+        if todo:
+            lines.append(f"to release   {todo}  (R releases it, b bumps the version)")
         lines += ["", "Open PRs:"]
         for p in sorted(((node.get("pullRequests") or {}).get("nodes") or []), key=lambda p: p["number"]):
             lines.append(f"  #{p['number']} {p['title']}{' (draft)' if p['isDraft'] else ''}")
@@ -781,8 +784,8 @@ class HubraTui(App):
         key = self.current_key()
         if self.tab() == "prs" and key:
             key = self.prs[key]["repo"]
-        if self.tab() not in ("repos", "prs") or not key or not g.is_plugin(key):
-            self.log_line(f"{verb}: pick a plugin in the Repos tab (1) first")
+        if self.tab() not in ("repos", "prs") or not key or not g.has_version(key):
+            self.log_line(f"{verb}: pick a plugin or hubra in the Repos tab (1) first")
             return None
         return key
 
@@ -954,10 +957,11 @@ class HubraTui(App):
         key = self.current_key()
         if self.tab() != "repos" or not key:
             return
-        if not g.is_plugin(key):
-            self.log_line("Core releases follow docs/release-guidelines.md")
+        if not g.has_version(key):
+            self.log_line(f"{g.short(key)} has no version to release")
             return
-        self.confirm_then(f"Release {g.short(key)} at the version in plugin.yaml?\n"
+        where = g.CORE_VERSION[key][0] if key in g.CORE_VERSION else "plugin.yaml"
+        self.confirm_then(f"Release {g.short(key)} at the version in {where}?\n"
                           "(pushes the tag v<version> if it is new; the workflow builds the release)",
                           g.release, key, {})
 

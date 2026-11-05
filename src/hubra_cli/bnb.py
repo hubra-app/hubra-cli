@@ -5,10 +5,10 @@ bnb gets the Hubra parts:
 
   commands     bnb release | ship | bump | verify | key | setup | lists | hubra | login | logout
                (the same as the hubra command; bnb does status, prs, merge, doctor, sync, ...)
-  status       plugin.yaml version and what is left to release
+  status       version (plugin.yaml, or app/backend/pyproject.toml for hubra) and what is left to release
   doctor       the plugin-signing environment, HUBRA_SIGNING_KEY, release.yml
   TUI          Hubra tab (health, alerts, errors, jobs, token), Checks › Plugin lists and
-               Release zips, keys b bump · R release · S ship, the Hubra themes
+               Release zips, keys b bump · R release · S ship (plugins and hubra), the Hubra themes
 
 The class doesn't import bitsandbricks: bnb only needs these methods, so hubra-cli
 works (and tests) without bnb installed.
@@ -50,18 +50,15 @@ def manifest_of(node: dict) -> tuple[str, str] | None:
     return cli.parse_manifest((node.get("manifest") or {}).get("text"))
 
 
-def to_release(node: dict) -> str:
-    m = manifest_of(node)
-    if not m or m[0] == "example":
-        return ""
-    last = cli.newest([r["tagName"] for r in (node.get("releases") or {}).get("nodes") or []])
-    return f"v{m[1]}" if not last or cli.version_tuple(m[1]) > cli.version_tuple(last) else ""
+def has_version(repo: str) -> bool:
+    return is_hubra_plugin(repo) or repo in cli.CORE_VERSION
 
 
 class HubraPlugin:
     name = "hubra"
     description = "Hubra plugin releases, signing, plugin lists and the Hubra API"
-    graphql_fields = 'manifest: object(expression: "HEAD:plugin.yaml") { ... on Blob { text } }'
+    graphql_fields = ('manifest: object(expression: "HEAD:plugin.yaml") { ... on Blob { text } }\n'
+                      'pyproject: object(expression: "HEAD:app/backend/pyproject.toml") { ... on Blob { text } }')
 
     # ── commands ──────────────────────────────────────────────────────────
 
@@ -84,17 +81,22 @@ class HubraPlugin:
     def status_columns(self) -> list:
         def version(repo: str, node: dict) -> str:
             m = manifest_of(node) if is_hubra_plugin(repo) else None
-            return ("template" if m[0] == "example" else m[1]) if m else ""
-        return [("plugin.yaml", version), ("to release", lambda repo, node: to_release(node))]
+            if m and m[0] == "example":
+                return "template"
+            return cli.node_version(repo, node) or ""
+        return [("version", version), ("to release", cli.to_release)]
 
     def repo_detail(self, repo: str, node: dict) -> list[str]:
-        m = manifest_of(node) if is_hubra_plugin(repo) else None
-        if not m:
+        if not has_version(repo):
             return []
-        lines = [f"plugin.yaml  {m[0]} {m[1]}"]
-        todo = to_release(node)
+        m = manifest_of(node) if is_hubra_plugin(repo) else None
+        if m:
+            lines = [f"plugin.yaml  {m[0]} {m[1]}"]
+        else:
+            lines = [f"version      {cli.node_version(repo, node) or '-'}  ({cli.CORE_VERSION[repo][0]})"]
+        todo = cli.to_release(repo, node)
         if todo:
-            lines.append(f"to release   {todo}  (R releases it)")
+            lines.append(f"to release   {todo}  (R pushes the tag, b bumps the version)")
         return lines
 
     def doctor(self, repo: str, group, ctx: dict) -> list[str]:
@@ -142,8 +144,8 @@ class HubraPlugin:
     @staticmethod
     def plugin_repo(app, verb: str) -> str | None:
         repo = app.selected_repo()
-        if not repo or not is_hubra_plugin(repo):
-            app.log_line(f"{verb}: pick a Hubra plugin in the Repos tab first")
+        if not repo or not has_version(repo):
+            app.log_line(f"{verb}: pick a Hubra plugin or hubra in the Repos tab first")
             return None
         return repo
 
@@ -161,13 +163,19 @@ class HubraPlugin:
                 app.log_line(f"bump {name} {level}{' (auto-merge)' if auto else ''} …")
                 app.do_job(self.with_dry_run(app, cli.for_each), [repo], cli.bump,
                            {"level": level, "auto": bool(auto)}, False)
-        app.pick(f"Bump {name}: open a PR with the next version in plugin.yaml and a\n"
-                 "CHANGELOG section of the PRs merged since the last release.", options, chosen)
+        if repo in cli.CORE_VERSION:
+            question = (f"Bump {name}: open a PR with the next version in {cli.CORE_VERSION[repo][0]}\n"
+                        "and [Unreleased] of the changelogs moved to its section.")
+        else:
+            question = (f"Bump {name}: open a PR with the next version in plugin.yaml and a\n"
+                        "CHANGELOG section of the PRs merged since the last release.")
+        app.pick(question, options, chosen)
 
     def release(self, app) -> None:
         repo = self.plugin_repo(app, "R releases a plugin")
         if repo:
-            app.confirm_then(f"Release {cli.short(repo)} at the version in plugin.yaml?\n"
+            where = cli.CORE_VERSION[repo][0] if repo in cli.CORE_VERSION else "plugin.yaml"
+            app.confirm_then(f"Release {cli.short(repo)} at the version in {where}?\n"
                              "(pushes the tag v<version> if it is new; the workflow builds the release)",
                              self.with_dry_run(app, cli.release), repo, {})
 
