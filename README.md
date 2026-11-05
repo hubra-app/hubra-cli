@@ -15,7 +15,9 @@ admin:org,workflow`).
 
 ```sh
 pipx install "hubra-cli[tui] @ git+https://github.com/hubra-app/hubra-cli"
-pipx upgrade hubra-cli                 # later, for a new version
+pipx upgrade hubra-cli                 # later, when the version went up
+# same version but newer code (e.g. main between releases):
+# pipx install --force "hubra-cli[tui] @ git+https://github.com/hubra-app/hubra-cli"
 # without the TUI: pipx install git+https://github.com/hubra-app/hubra-cli
 ```
 
@@ -37,7 +39,10 @@ hubra runs --failed           # recent failed Actions runs
 hubra open budgets#12         # open a repo / PR / --actions / --releases page
 hubra bump budgets minor      # PR with plugin.yaml + CHANGELOG for the next version
 hubra lists                   # plugin lists vs releases (--fix opens PRs)
-hubra doctor                  # plugin repos that drifted from the template
+hubra doctor                  # repos that drifted from the template (--fix applies it)
+hubra sync                    # PRs that copy the template's shared files to plugins
+hubra verify                  # check the latest release zips against Hubra.pub
+hubra security                # open Dependabot, secret- and code-scanning alerts
 hubra setup                   # create new plugin repos, copy the template's setup
 hubra key signing.key         # store the plugin signing key
 hubra login                   # save a Hubra API token
@@ -68,6 +73,37 @@ plugin shows it as drift; `hubra setup <name>` copies it over. doctor also
 checks the template itself: its live rulesets against its `.github/rulesets`
 files, and auto-merge, branch deletion, wiki and projects.
 
+Each repo's own `.github/rulesets/*.json` files count too. doctor reports a
+file that isn't imported or differs from the live ruleset, a plugin's file that
+differs from the template's file of the same name, and a live ruleset that is
+neither in the template nor in the repo's files. Core repos (hubra, …) are
+checked against their own files only. `hubra setup` imports a plugin's extra
+rulesets (names the template doesn't have) from its files.
+
+`hubra doctor --fix` applies what it can: the template's settings, security
+features, release immutability and rulesets on each plugin, the repo's own
+rulesets files on every repo, and the settings plugins need on the template
+itself (first, so the plugins get them). The plugin-signing environment stays
+with `hubra setup`, the key with `hubra key`, and files with `hubra sync`, which
+opens one PR per plugin for the shared files in `SYNC_FILES` (release.yml,
+rulesets files, PR template, SECURITY.md, LICENSE, .gitignore, .gitattributes).
+
+## Verify a release
+
+`hubra verify [names] [--tag v1.2.0]` downloads each plugin's release zip and
+checks it the way Hubra does before installing it: the `.sha256` file, the
+`SIGNATURE.json` key (must be Hubra.pub), every file hash, the Ed25519
+signature, and id and version against plugin.yaml and the tag.
+
+## Links over SSH
+
+Over SSH (`SSH_CONNECTION` set) a link doesn't start a browser on the server:
+Enter, `o` or a click copies the URL to your own clipboard (OSC 52, which
+iTerm2, kitty, WezTerm, Windows Terminal and tmux with `set -g set-clipboard
+on` pass on; iTerm2 asks once under Settings › General › Selection) and shows
+the full URL in the log to cmd/ctrl-click. `HUBRA_OPEN=browser`, `copy` or
+`print` picks the behaviour yourself.
+
 ## Hubra API
 
 `hubra hubra …` and the TUI's Hubra tab read the running Hubra with an API
@@ -79,11 +115,11 @@ point at another install.
 
 ## TUI keys
 
-Tabs: Repos, Pull requests, Runs, Checks (plugin lists and doctor) and Hubra,
+Tabs: Repos, Pull requests, Runs, Security (open alerts), Checks (plugin lists, doctor, release zips) and Hubra,
 in the Hubra colours (`t` switches to the light theme).
-`1`-`5` switch tabs and the arrow keys move right away · `Enter` or `o` open in
+`←` `→` or `1`-`6` switch tabs and `↑` `↓` move right away · `Enter` or `o` open in
 the browser · `r` refresh · `m` auto-merge · `M` merge now · `y` mark ready ·
-`d` diff · `R` release · `a` approve signing · `q` quit. Links in the detail
+`A` auto-merge all ready PRs · `d` diff · `R` release · `a` approve a waiting run (signing or an outside contributor's run; the Runs tab and the header show how many wait) · `q` quit. Links in the detail
 pane and the log are short labels you can click. Every change asks first;
 `hubra tui --dry-run` only shows what it would do.
 

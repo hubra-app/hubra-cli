@@ -5,21 +5,26 @@ Start it with `hubra tui`; it needs the [tui] extra (README › Install) or
 
   Repos          version on main, latest release, what's left to release, PRs, CI
   Pull requests  every open PR; the right side shows the selected one in depth
-  Runs           signing runs waiting for you, then the newest run per repo
+  Runs           runs waiting for your approval (signing, outside contributors),
+                 then the newest run per repo; the tab and header show the count
+  Security       open Dependabot, secret-scanning and code-scanning alerts
   Checks         plugin lists against the releases, repo settings (doctor)
   Hubra          health, alerts, errors, jobs and token of the running Hubra
                  (needs a token: `hubra login` or HUBRA_TOKEN)
 
-Keys: 1-5 switch tabs · arrows move · Enter or o open in browser · r refresh
-· m auto-merge · M merge now · y mark ready · d diff · R release · a approve
-signing · t light/dark · q quit. Links in the detail pane and the log open on
-click. Every action that changes something asks first; with --dry-run it only
-shows what it would do.
+Keys: ← → or 1-6 switch tabs · ↑ ↓ move · Enter or o open in browser · r refresh
+· m auto-merge · M merge now · A auto-merge all ready PRs · v filter PRs
+(auto-merge, recently merged, drafts) · y mark ready · d diff · b bump
+· R release · S ship · a approve a waiting run · f fix drift and s sync files
+(Checks tab) · t light/dark · ctrl+p every command (also setup, signing key,
+Hubra login) · q quit. Links in the detail pane and the log open on click.
+Every action that changes something asks first; with --dry-run it only shows what it would do.
 """
 
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 import time
 import webbrowser
@@ -28,7 +33,7 @@ from typing import ClassVar
 from rich.style import Style
 from rich.text import Text
 from textual import work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
@@ -39,7 +44,9 @@ from textual.widgets import (
     DataTable,
     Footer,
     Header,
+    Input,
     Label,
+    OptionList,
     RichLog,
     Static,
     TabbedContent,
@@ -49,7 +56,9 @@ from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 
 from hubra_cli import cli as g
 
-CHECKS = [("lists", "Plugin lists"), ("doctor", "Repo settings")]
+TABS = [("repos", "Repos"), ("prs", "Pull requests"), ("runs", "Runs"), ("security", "Security"),
+        ("checks", "Checks"), ("hubra", "Hubra")]
+CHECKS = [("lists", "Plugin lists"), ("doctor", "Repo settings"), ("verify", "Release zips")]
 
 HUBRA_SECTIONS = [
     ("health", "Health", "/app/platform/diagnostics"),
@@ -148,6 +157,62 @@ class Confirm(ModalScreen[bool]):
         self.dismiss(value)
 
 
+class Ask(ModalScreen[str]):
+    """One line of input (a path, a token); Enter answers, Esc cancels."""
+
+    DEFAULT_CSS = """
+    Ask { align: center middle; }
+    Ask > Vertical { width: 80; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
+    Ask Input { margin-top: 1; }
+    """
+    BINDINGS: ClassVar = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, question: str, password: bool = False, value: str = "") -> None:
+        super().__init__()
+        self.question, self.password, self.value = question, password, value
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(Text(self.question))
+            yield Input(value=self.value, password=self.password)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip())
+
+    def action_cancel(self) -> None:
+        self.dismiss("")
+
+
+class Pick(ModalScreen[str]):
+    """Choose one of a few options; Enter picks, Esc cancels."""
+
+    DEFAULT_CSS = """
+    Pick { align: center middle; }
+    Pick > Vertical { width: 80; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
+    Pick OptionList { height: auto; max-height: 12; margin-top: 1; }
+    """
+    BINDINGS: ClassVar = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, question: str, options: list[tuple[str, str]]) -> None:
+        super().__init__()
+        self.question, self.options = question, options
+
+    def compose(self) -> ComposeResult:
+        from textual.widgets.option_list import Option
+        with Vertical():
+            yield Label(Text(self.question))
+            yield OptionList(*[Option(label, id=key) for key, label in self.options])
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id or "")
+
+    def action_cancel(self) -> None:
+        self.dismiss("")
+
+
+PR_FILTERS = [("all", "all open"), ("auto", "auto-merge"), ("merged", "recently merged"), ("drafts", "drafts")]
+
+
 class HubraTui(App):
     TITLE = "Hubra"
     CSS = """
@@ -172,20 +237,29 @@ class HubraTui(App):
         scrollbar-color: $primary 40%; scrollbar-color-hover: $primary 70%; scrollbar-color-active: $primary; }
     """
     BINDINGS: ClassVar = [
+        Binding("left", "next_tab(-1)", "Prev tab", show=False, priority=True),
+        Binding("right", "next_tab(1)", "Next tab", show=False, priority=True),
         Binding("1", "tab('repos')", "Repos", show=False),
         Binding("2", "tab('prs')", "PRs", show=False),
         Binding("3", "tab('runs')", "Runs", show=False),
-        Binding("4", "tab('checks')", "Checks", show=False),
-        Binding("5", "tab('hubra')", "Hubra", show=False),
+        Binding("4", "tab('security')", "Security", show=False),
+        Binding("5", "tab('checks')", "Checks", show=False),
+        Binding("6", "tab('hubra')", "Hubra", show=False),
         Binding("r", "refresh", "Refresh"),
         Binding("o", "open", "Open"),
         Binding("t", "toggle_theme", "Light/dark", show=False),
         Binding("m", "merge(False)", "Auto-merge"),
         Binding("M", "merge(True)", "Merge now"),
+        Binding("A", "merge_all", "Auto-merge all"),
+        Binding("v", "pr_filter", "PR filter"),
+        Binding("b", "bump", "Bump"),
+        Binding("S", "ship", "Ship", show=False),
         Binding("y", "ready", "Ready"),
         Binding("d", "diff", "Diff"),
         Binding("R", "release", "Release"),
         Binding("a", "approve", "Approve"),
+        Binding("f", "fix", "Fix drift", show=False),
+        Binding("s", "sync", "Sync files", show=False),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -200,14 +274,16 @@ class HubraTui(App):
         self.info: dict[str, dict] = {}
         self.last_summary = ""
         self.last_waiting = 0
+        self.pr_filter = "all"
+        self.alerts: dict[str, tuple[list[dict], list[str]]] = {}
+        self.last_alerts = 0
 
     # ── layout ────────────────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
         yield Header()
         with TabbedContent(id="tabs"):
-            for tab_id, title in (("repos", "Repos"), ("prs", "Pull requests"),
-                                  ("runs", "Runs"), ("checks", "Checks"), ("hubra", "Hubra")):
+            for tab_id, title in TABS:
                 with TabPane(title, id=tab_id), Horizontal(classes="split"):
                     yield DataTable(id=f"{tab_id}-table", cursor_type="row", zebra_stripes=True)
                     with VerticalScroll(classes="detail", can_focus=False):
@@ -224,6 +300,7 @@ class HubraTui(App):
             "repos": g.STATUS_HEAD,
             "prs": ["repo", "#", "title", "state", "checks"],
             "runs": ["repo", "state", "workflow", "ref", "when"],
+            "security": ["repo", "alerts", "worst", "kinds"],
             "checks": ["check"],
             "hubra": ["view"],
         }
@@ -235,10 +312,11 @@ class HubraTui(App):
         checks = self.query_one("#checks-table", DataTable)
         for key, label in CHECKS:
             checks.add_row(label, key=key)
-        self.log_line("Loading … 1-5 switch tabs, arrows move, Enter opens, r refreshes, q quits")
+        self.log_line("Loading … ← → or 1-6 switch tabs, ↑ ↓ move, Enter opens, r refreshes, q quits")
         self.focus_table()
         self.load_github()
         self.load_runs()
+        self.load_security()
         self.set_interval(120, self.action_refresh)
 
     def log_line(self, text: str) -> None:
@@ -258,19 +336,43 @@ class HubraTui(App):
         """Signal Gold on the dark theme; deep violet on the light one (gold needs ink behind it)."""
         return VIOLET[7] if self.theme == "hubra-light" else GOLD
 
+    def action_next_tab(self, step: int) -> None:
+        if not isinstance(self.screen, ModalScreen):
+            order = [t for t, _ in TABS]
+            self.action_tab(order[(order.index(self.tab()) + step) % len(order)])
+        else:  # in a confirm dialog the arrows move between Yes and No
+            self.screen.focus_next() if step > 0 else self.screen.focus_previous()
+
     def action_toggle_theme(self) -> None:
         self.theme = "hubra-light" if self.theme == "hubra" else "hubra"
         self.action_refresh()
 
     def action_open_link(self, url: str) -> None:
-        self.log_line(f"open {url}")
-        webbrowser.open(url)
+        mode = g.open_mode()
+        if mode == "browser":
+            self.log_line(f"open {url}")
+            webbrowser.open(url)
+            return
+        log = self.query_one("#log", RichLog)
+        line = Text(time.strftime("%H:%M:%S "), style="dim")
+        if mode == "copy":
+            # OSC 52: the terminal on your own machine puts it on the clipboard, also over SSH
+            self.copy_to_clipboard(url)
+            line.append("copied ")
+        line.append(url, style=Style(underline=True, link=url))  # full URL, to select or cmd/ctrl-click
+        log.write(line)
 
     def tab(self) -> str:
-        return self.query_one("#tabs", TabbedContent).active
+        try:
+            return self.query_one("#tabs", TabbedContent).active
+        except NoMatches:  # the app is closing
+            return ""
 
     def current_key(self, tab_id: str | None = None) -> str | None:
-        table = self.query_one(f"#{tab_id or self.tab()}-table", DataTable)
+        tab_id = tab_id or self.tab()
+        if not tab_id:
+            return None
+        table = self.query_one(f"#{tab_id}-table", DataTable)
         if table.row_count == 0:
             return None
         try:
@@ -316,33 +418,119 @@ class HubraTui(App):
             table.add_row(*cells, key=repo)
         self.restore(table, keep)
 
-        table = self.query_one("#prs-table", DataTable)
-        keep = self.current_key("prs")
-        table.clear()
-        for key, p in prs.items():
-            commit = (p["commits"]["nodes"] or [{}])[0].get("commit") or {}
-            state = "draft" if p["isDraft"] else "ready"
-            if p.get("mergeable") == "CONFLICTING":
-                state = "conflicts"
-            elif p.get("autoMergeRequest"):
-                state = "auto-merge"
-            table.add_row(g.short(p["repo"]).removeprefix(g.PREFIX), str(p["number"]),
-                          Text(p["title"][:60]), styled(state),
-                          styled(g.checks_word(commit.get("statusCheckRollup"))), key=key)
-        self.restore(table, keep)
+        for repo in self.repos:
+            for p in ((info.get(g.short(repo)) or {}).get("merged") or {}).get("nodes") or []:
+                self.prs[f"{repo}#{p['number']}"] = dict(p, repo=repo, merged=True, isDraft=False)
+        self.fill_prs()
         todo = sum(1 for r in rows if r[3])
         summary = f"{len(self.repos)} repos, {len(prs)} open PRs, {todo} plugin(s) to release"
+        auto = sum(1 for p in prs.values() if p.get("autoMergeRequest"))
+        if auto:
+            summary += f", {auto} auto-merging (v filters the PR list)"
         if summary != self.last_summary:
             self.last_summary = summary
             self.log_line(summary)
         self.update_detail()
 
+    def fill_prs(self) -> None:
+        table = self.query_one("#prs-table", DataTable)
+        keep = self.current_key("prs")
+        table.clear()
+        rows = []
+        for key, p in self.prs.items():
+            if p.get("merged"):
+                state, checks, sort = Text(f"merged {g.ago(p.get('mergedAt'))}", style=SUCCESS), Text(""), 3
+            else:
+                commit = (p["commits"]["nodes"] or [{}])[0].get("commit") or {}
+                word = g.checks_word(commit.get("statusCheckRollup"))
+                checks, sort = styled(word), 1
+                if p.get("mergeable") == "CONFLICTING":
+                    state = styled("conflicts")
+                elif p.get("autoMergeRequest"):
+                    # what auto-merge waits for: checks running, or blocked by failing checks
+                    state = Text(f"auto-merge · {'blocked' if word == 'failing' else 'waits for checks'}",
+                                 style=DANGER if word == "failing" else VIOLET[4])
+                    sort = 0
+                else:
+                    state = styled("draft" if p["isDraft"] else "ready")
+                    sort = 2 if p["isDraft"] else 1
+            keep_row = {"all": not p.get("merged"), "auto": bool(p.get("autoMergeRequest")) or p.get("merged"),
+                        "merged": p.get("merged"), "drafts": p.get("isDraft")}[self.pr_filter]
+            if keep_row:
+                rows.append((sort, key, [g.short(p["repo"]).removeprefix(g.PREFIX), str(p["number"]),
+                                         Text(p["title"][:60]), state, checks]))
+        for _, key, cells in sorted(rows, key=lambda r: r[0]):
+            table.add_row(*cells, key=key)
+        self.restore(table, keep)
+        label = dict(PR_FILTERS)[self.pr_filter]
+        auto = sum(1 for p in self.prs.values() if p.get("autoMergeRequest"))
+        with contextlib.suppress(NoMatches):
+            self.query_one("#tabs", TabbedContent).get_tab("prs").label = (
+                "Pull requests" + (f" ({label})" if self.pr_filter != "all" else "")
+                + (f" · {auto} auto-merging" if auto else ""))
+
+    @work(thread=True, exclusive=True, group="security")
+    def load_security(self) -> None:
+        try:
+            repos = self.repos or [g.full(c) for c in g.CORE] + [g.full(n) for n in g.plugin_names()]
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(g.WORKERS) as pool:
+                found = dict(zip(repos, pool.map(g.repo_alerts, repos)))
+        except RuntimeError as err:
+            self.call_from_thread(self.log_line, f"Security: {err}")
+            return
+        self.call_from_thread(self.fill_security, found)
+
+    def fill_security(self, found: dict) -> None:
+        with contextlib.suppress(NoMatches):
+            self.alerts = found
+            table = self.query_one("#security-table", DataTable)
+            keep = self.current_key("security")
+            table.clear()
+            rank = g.SEVERITY_ORDER
+            rows = sorted(found.items(), key=lambda kv: (rank.get(kv[1][0][0]["severity"], 5) if kv[1][0] else 9,
+                                                          -len(kv[1][0]), kv[0]))
+            for repo, (alerts, unread) in rows:
+                worst = alerts[0]["severity"] if alerts else ("?" if unread else "-")
+                style = DANGER if worst in ("critical", "high", "secret") else WARNING if alerts else ""
+                kinds = ", ".join(sorted({a["kind"] for a in alerts})) or ("can't read all" if unread else "")
+                table.add_row(g.short(repo).removeprefix(g.PREFIX), Text(str(len(alerts)), style=style),
+                              Text(worst, style=style), kinds, key=repo)
+            self.restore(table, keep)
+            total = sum(len(a) for a, _ in found.values())
+            self.query_one("#tabs", TabbedContent).get_tab("security").label = (
+                f"Security ({total})" if total else "Security")
+            if total and total != self.last_alerts:
+                self.log_line(f"{total} open security alert(s): Security tab (4)")
+            self.last_alerts = total
+            self.update_detail()
+
+    def security_text(self, repo: str) -> str:
+        alerts, unread = self.alerts.get(repo, ([], []))
+        lines = [repo, f"{g.WEB}/{repo}/security", ""]
+        for a in alerts:
+            lines.append(f"{a['severity']:<9} {a['kind']:<16} {a['title']}")
+            if a["where"]:
+                lines.append(f"{'':<26} {a['where']}")
+            lines.append(f"{'':<26} {a['url']}")
+        if not alerts:
+            lines.append("No open alerts.")
+        if unread:
+            lines += ["", "Couldn't read:"] + [f"  {u}" for u in unread]
+        return "\n".join(lines)
+
+    def action_pr_filter(self) -> None:
+        order = [k for k, _ in PR_FILTERS]
+        self.pr_filter = order[(order.index(self.pr_filter) + 1) % len(order)]
+        self.action_tab("prs")
+        self.fill_prs()
+        self.log_line(f"Pull requests: {dict(PR_FILTERS)[self.pr_filter]} (v switches)")
+
     @work(thread=True, exclusive=True, group="runs")
     def load_runs(self) -> None:
         try:
-            plugins = [r for r in self.repos or [g.full(n) for n in g.plugin_names()] if g.is_plugin(r)]
-            waiting = g.all_waiting(plugins)
-            repos = self.repos or [g.full(c) for c in g.CORE] + plugins
+            repos = self.repos or [g.full(c) for c in g.CORE] + [g.full(n) for n in g.plugin_names()]
+            waiting = g.all_waiting(repos)
 
             def latest(repo):
                 runs = (g.api("GET", f"/repos/{repo}/actions/runs?per_page=1") or {}).get("workflow_runs") or []
@@ -383,8 +571,13 @@ class HubraTui(App):
                           run.get("head_branch") or "", g.ago(run.get("created_at")), key=key)
         self.restore(table, keep)
         if len(waiting) != self.last_waiting and waiting:
-            self.log_line(f"{len(waiting)} run(s) wait for your signing approval: Runs tab, key a")
+            self.log_line(f"{len(waiting)} run(s) wait for your approval: Runs tab (3), key a")
         self.last_waiting = len(waiting)
+        base = "dry run: nothing changes" if self.dry_run else "hubra-app"
+        self.sub_title = f"{base} · {len(waiting)} to approve (3, a)" if waiting else base
+        with contextlib.suppress(NoMatches):
+            tabs = self.query_one("#tabs", TabbedContent)
+            tabs.get_tab("runs").label = f"Runs ({len(waiting)} to approve)" if waiting else "Runs"
         self.update_detail()
 
     @staticmethod
@@ -418,6 +611,8 @@ class HubraTui(App):
             else:
                 self.show("prs", "Loading …")
                 self.load_pr(key)
+        elif tab == "security":
+            self.show("security", self.security_text(key))
         elif tab == "runs":
             repo, run, envs = self.runs[key]
             lines = [f"{g.short(repo)}  {run.get('name')}", run["html_url"], "",
@@ -468,8 +663,11 @@ class HubraTui(App):
             text = g.capture(g.HUBRA_VIEWS[key])
         elif key == "lists":
             text = g.capture(g.lists, False)
+        elif key == "verify":
+            text = g.capture(g.for_each, [r for r in self.repos if g.is_plugin(r)], g.verify, {})
         else:
-            text = g.capture(g.doctor_all, [r for r in self.repos if g.is_plugin(r)])
+            text = g.capture(g.doctor_all, self.repos)
+            text += "\nf applies the fixes (doctor --fix) · s opens PRs with the template's files (sync)\n"
         self.detail_cache[f"{tab}:{key}"] = text
         self.call_from_thread(self.show_if_current, tab, key, text)
 
@@ -483,6 +681,7 @@ class HubraTui(App):
         self.detail_cache.clear()
         self.load_github()
         self.load_runs()
+        self.load_security()
         if self.tab() in ("hubra", "checks"):
             self.update_detail()
 
@@ -496,12 +695,128 @@ class HubraTui(App):
             url = self.prs[key]["url"]
         elif tab == "runs":
             url = self.runs[key][1]["html_url"]
+        elif tab == "security":
+            alerts = self.alerts.get(key, ([], []))[0]
+            url = alerts[0]["url"] if len(alerts) == 1 else f"{g.WEB}/{key}/security"
         elif tab == "checks":
             docs = f"{g.WEB}/{g.ORG}/hubra/blob/main/docs/plugin-releases.md"
             url = docs if key == "lists" else f"{g.WEB}/{g.TEMPLATE}"
         else:
             url = g.MANAGE + {k: path for k, _, path in HUBRA_SECTIONS}[key]
         self.action_open_link(url)
+
+    def action_fix(self) -> None:
+        if self.tab() == "checks" and self.current_key() == "lists":
+            self.confirm_then("Open PRs for outdated plugin versions in the hubra README and the\n"
+                              "Marketplace README? (hubra lists --fix)", g.lists, True)
+            return
+        if self.tab() != "checks" or self.current_key() != "doctor":
+            self.log_line("f fixes drift from the Checks tab › Repo settings or Plugin lists")
+            return
+        self.confirm_then("Apply the template's settings and rulesets (and each repo's own rulesets files)\n"
+                          "to every repo that drifted? (hubra doctor --fix)", g.doctor_all, list(self.repos), True)
+
+    def action_sync(self) -> None:
+        if self.tab() != "checks" or self.current_key() != "doctor":
+            self.log_line("s syncs files from the Checks tab › Repo settings")
+            return
+        plugins = [r for r in self.repos if g.is_plugin(r)]
+
+        def sync_all(repos) -> None:
+            g.for_each(repos, g.sync, g.sync_ctx())
+        self.confirm_then("Open a PR in each plugin whose shared files (release.yml, rulesets, SECURITY.md, ...)\n"
+                          "differ from the template? (hubra sync)", sync_all, plugins)
+
+    def selected_plugin(self, verb: str) -> str | None:
+        key = self.current_key()
+        if self.tab() == "prs" and key:
+            key = self.prs[key]["repo"]
+        if self.tab() not in ("repos", "prs") or not key or not g.is_plugin(key):
+            self.log_line(f"{verb}: pick a plugin in the Repos tab (1) first")
+            return None
+        return key
+
+    def action_bump(self) -> None:
+        repo = self.selected_plugin("b bumps a plugin's version")
+        if not repo:
+            return
+        name = g.short(repo).removeprefix(g.PREFIX)
+        options = [(f"{lvl}{'+auto' if auto else ''}", f"{lvl}{' and auto-merge the PR' if auto else ''}")
+                   for auto in (False, True) for lvl in ("patch", "minor", "major")]
+
+        def chosen(choice: str | None) -> None:
+            if choice:
+                level, _, auto = choice.partition("+")
+                self.log_line(f"bump {name} {level}{' (auto-merge)' if auto else ''} …")
+                self.do_job(g.for_each, [repo], g.bump, {"level": level, "auto": bool(auto)}, False)
+        self.push_screen(Pick(f"Bump {name}: open a PR with the next version in plugin.yaml and a\n"
+                              "CHANGELOG section of the PRs merged since the last release.", options), chosen)
+
+    def action_ship(self) -> None:
+        repo = self.selected_plugin("S ships a plugin")
+        if repo:
+            self.confirm_then(f"Ship {g.short(repo)}: merge its ready PRs, then release the version in\n"
+                              "plugin.yaml (pushes the tag; the workflow builds the release)?",
+                              g.for_each, [repo], g.ship, {"pick": {}, "now": True, "ready": False}, False)
+
+    def action_setup(self) -> None:
+        repo = self.selected_plugin("setup")
+        if repo:
+            def setup(repo: str) -> None:
+                g.for_each([repo], g.setup, {"me": g.api("GET", "/user"), "template": g.template_baseline()}, False)
+            self.confirm_then(f"Set up {g.short(repo)}: copy the template's settings and rulesets and\n"
+                              "create the plugin-signing environment (you as reviewer, v* tags)?", setup, repo)
+
+    def action_store_key(self) -> None:
+        repo = self.selected_plugin("key")
+        if not repo:
+            return
+
+        def got(path: str | None) -> None:
+            if not path:
+                return
+            try:
+                key = g.read_key(os.path.expanduser(path))
+            except SystemExit as err:  # read_key exits with the reason
+                self.log_line(str(err))
+                return
+            self.confirm_then(f"Store this key as HUBRA_SIGNING_KEY in {g.short(repo)}'s plugin-signing\n"
+                              "environment?", g.set_key, repo, key)
+        self.push_screen(Ask("Private key file of Hubra.pub (PEM), e.g. ~/keys/hubra-plugin.key"), got)
+
+    def action_login(self) -> None:
+        def got(token: str | None) -> None:
+            if token:
+                self.do_job(lambda t: g.say(g.save_token(t)), token)
+        self.push_screen(Ask("Hubra API token (hbr_…), kept in ~/.config/hubra/token", password=True), got)
+
+    def get_system_commands(self, screen):
+        yield from super().get_system_commands(screen)
+        commands = [
+            ("Auto-merge all ready PRs", "A · every ready PR merges once its checks pass", self.action_merge_all),
+            ("Filter pull requests", "v · all, auto-merge, recently merged, drafts", self.action_pr_filter),
+            ("Bump plugin version", "b · PR with the next version and changelog", self.action_bump),
+            ("Release plugin", "R · push the tag for the version in plugin.yaml", self.action_release),
+            ("Ship plugin", "S · merge its ready PRs, then release", self.action_ship),
+            ("Approve waiting run", "a · signing or an outside contributor's run", self.action_approve),
+            ("Fix drift", "f · hubra doctor --fix / lists --fix (Checks tab)", self.action_fix),
+            ("Sync template files", "s · PRs with the template's shared files", self.action_sync),
+            ("Set up plugin repo", "copy the template, create the plugin-signing environment", self.action_setup),
+            ("Store signing key", "HUBRA_SIGNING_KEY for the selected plugin", self.action_store_key),
+            ("Hubra login", "save a Hubra API token for the Hubra tab", self.action_login),
+            ("Security alerts", "4 · open Dependabot, secret and code scanning alerts",
+             lambda: self.action_tab("security")),
+            ("Verify release zips", "Checks › Release zips", lambda: self.show_check("verify")),
+            ("Check plugin lists", "Checks › Plugin lists", lambda: self.show_check("lists")),
+            ("Check repo settings", "Checks › Repo settings (doctor)", lambda: self.show_check("doctor")),
+            ("Light/dark theme", "t", self.action_toggle_theme),
+        ]
+        for title, help_text, callback in commands:
+            yield SystemCommand(title, help_text, callback)
+
+    def show_check(self, key: str) -> None:
+        self.action_tab("checks")
+        self.restore(self.query_one("#checks-table", DataTable), key)
 
     def confirm_then(self, question: str, job, *args) -> None:
         if self.dry_run:
@@ -518,6 +833,8 @@ class HubraTui(App):
         self.call_from_thread(self.after_action, text)
 
     def after_action(self, text: str) -> None:
+        if not self.tab():
+            return
         for line in text.splitlines():
             if line.strip():
                 self.log_line(line)
@@ -529,6 +846,9 @@ class HubraTui(App):
             return
         if tab == "prs":
             p = self.prs[key]
+            if p.get("merged"):
+                self.log_line(f"{g.short(p['repo'])}#{p['number']} is already merged")
+                return
             repo = p["repo"]
             ctx = {"pick": {repo: [p["number"]]}, "now": now, "ready": False}
             what = f"{'Merge now' if now else 'Turn on auto-merge for'} {g.short(repo)}#{p['number']}\n{p['title']}?"
@@ -538,11 +858,33 @@ class HubraTui(App):
             what = f"{'Merge now' if now else 'Auto-merge'} every ready PR in {g.short(repo)}?"
         self.confirm_then(what, g.merge, repo, ctx)
 
+    def action_merge_all(self) -> None:
+        ready = [p for p in self.prs.values() if not p["isDraft"] and not p.get("merged")
+                 and p.get("mergeable") != "CONFLICTING" and not p.get("autoMergeRequest")]
+        if not ready:
+            self.log_line("No ready PRs without auto-merge (drafts and conflicts are left alone)")
+            return
+        pick: dict[str, list[int]] = {}
+        for p in ready:
+            pick.setdefault(p["repo"], []).append(p["number"])
+        names = "\n".join(f"  {g.short(p['repo']).removeprefix(g.PREFIX)}#{p['number']} {p['title'][:60]}"
+                          for p in ready[:15]) + (f"\n  … and {len(ready) - 15} more" if len(ready) > 15 else "")
+
+        def merge_all(pick: dict[str, list[int]]) -> None:
+            g.for_each(list(pick), g.merge, {"pick": pick, "now": False, "ready": False})
+        self.confirm_then(f"Turn on auto-merge for {len(ready)} ready PR(s)? Each merges once its checks pass.\n\n"
+                          f"{names}", merge_all, pick)
+
     def action_ready(self) -> None:
         key = self.current_key()
-        if self.tab() != "prs" or not key or not self.prs[key]["isDraft"]:
+        if self.tab() != "prs" or not key:
+            self.log_line("y marks a draft PR ready: pick one in the Pull requests tab (2)")
             return
         p = self.prs[key]
+        if not p["isDraft"]:
+            done = "merged" if p.get("merged") else "ready for review"
+            self.log_line(f"{g.short(p['repo'])}#{p['number']} is already {done}")
+            return
 
         def ready(repo: str, number: int) -> None:
             if g.DRY_RUN:
@@ -572,6 +914,7 @@ class HubraTui(App):
     def action_approve(self) -> None:
         key = self.current_key()
         if self.tab() != "runs" or not key:
+            self.log_line("a approves a run waiting for you: Runs tab (3)")
             return
         repo, run, envs = self.runs[key]
         if not envs:
@@ -584,8 +927,14 @@ class HubraTui(App):
             else:
                 g.approve_run(repo, run, envs)
                 g.say(f"approved {', '.join(e['name'] for e in envs)} for {g.short(repo)} {run.get('head_branch')}")
-        self.confirm_then(f"Approve signing of {g.short(repo)} {run.get('head_branch')}?\n"
-                          f"This signs the plugin with the official key.", approve, repo, run, envs)
+        if g.RUN_APPROVAL in envs:
+            question = (f"Let {g.short(repo)} run {run.get('name')} on {run.get('head_branch')}?\n"
+                        "It comes from an outside contributor: check the PR's changes first.\n"
+                        f"{run.get('html_url')}")
+        else:
+            question = (f"Approve {', '.join(e['name'] for e in envs)} for {g.short(repo)} "
+                        f"{run.get('head_branch')}?\nThis signs the plugin with the official key.")
+        self.confirm_then(question, approve, repo, run, envs)
 
 
 def run(dry_run: bool = False) -> None:
