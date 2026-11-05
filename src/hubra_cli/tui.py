@@ -322,7 +322,8 @@ class HubraTui(App):
     def log_line(self, text: str) -> None:
         line = Text(time.strftime("%H:%M:%S "), style="dim")
         line.append_text(linkify(text.strip()))
-        self.query_one("#log", RichLog).write(line)
+        with contextlib.suppress(NoMatches):  # the app is closing
+            self.query_one("#log", RichLog).write(line)
 
     def focus_table(self, tab_id: str | None = None) -> None:
         with contextlib.suppress(Exception):
@@ -372,7 +373,10 @@ class HubraTui(App):
         tab_id = tab_id or self.tab()
         if not tab_id:
             return None
-        table = self.query_one(f"#{tab_id}-table", DataTable)
+        try:
+            table = self.query_one(f"#{tab_id}-table", DataTable)
+        except NoMatches:  # the app is closing while a worker finishes
+            return None
         if table.row_count == 0:
             return None
         try:
@@ -381,7 +385,8 @@ class HubraTui(App):
             return None
 
     def show(self, tab_id: str, text: str) -> None:
-        self.query_one(f"#{tab_id}-detail", Static).update(linkify(text))
+        with contextlib.suppress(NoMatches):  # the app is closing
+            self.query_one(f"#{tab_id}-detail", Static).update(linkify(text))
 
     # ── loading ───────────────────────────────────────────────────────────
 
