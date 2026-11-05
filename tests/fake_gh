@@ -26,6 +26,8 @@ for n in ["bank-import", "guides", "imap-inbox", "codes", "inventory", "document
           "kasse", "supporters", "booking", "teams", "community", "forms", "letters",
           "messengers", "assistant"]:
     PLUGINS[n] = (n, "1.0.0", ["v1.0.0"])
+PLUGINS["teams"] = ("teams", "1.1.0", ["v1.0.0"])  # tag v1.1.0 pushed, release not made yet
+PLUGINS["codes"] = ("codes", "1.1.0", ["v1.0.0"])  # still on the "release published" workflow
 REPOS = ["hubra", "hubra.club", "hubra-plugins", "hubra-plugins-template"] + [f"hubra-plugin-{n}" for n in PLUGINS]
 
 PRS = {
@@ -138,14 +140,23 @@ if argv[0] == "api":
         name = rest.split("/")[-1][:-5]
         content(json.dumps({"name": name, "enforcement": "active", "rules": [{"type": t} for t in RULES[name]]}))
     if rest.startswith("/contents/.github/workflows/release.yml"):
-        content("on: release", "codes-own" if repo == "hubra-plugin-codes" else "template-sha")
+        if repo in ("hubra-plugin-codes", "hubra-plugins-template"):  # still "release published"
+            content("on:\n  release:\n    types: [published]\n  push:\n    branches: [main]\njobs:\n",
+                    "template-sha" if repo == "hubra-plugins-template" else "codes-own")
+        content('on:\n  push:\n    branches: [main]\n    tags: ["v*"]\njobs:\n', "template-sha")
+    if rest.startswith("/git/ref/tags/"):
+        tag = rest.rsplit("/", 1)[-1]
+        if p and tag in p[2] or (repo == "hubra-plugin-teams" and tag == "v1.1.0"):
+            out({"object": {"sha": "tagsha"}})
+        fail("gh: Not Found (HTTP 404)")
     if rest.startswith("/contents/"):
         key = f"{repo}/{rest[len('/contents/'):].split('?')[0]}"
         if key in LISTS:
             content(LISTS[key])
         fail("gh: Not Found (HTTP 404)")
     if rest.startswith("/releases/tags/"):
-        out({"published_at": "2026-11-01T00:00:00Z"})
+        assets = [] if repo == "hubra-plugin-discord" else [{"name": "x-1.0.0.zip"}]
+        out({"published_at": "2026-11-01T00:00:00Z", "assets": assets})
     if rest.startswith("/releases"):
         out([{"tag_name": t} for t in (p[2] if p else [])])
     if rest.startswith("/pulls"):

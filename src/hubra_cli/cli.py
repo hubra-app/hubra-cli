@@ -46,9 +46,11 @@ merge    Turns on auto-merge (squash) for every open PR that isn't a draft:
          instead of waiting (GitHub refuses while required checks are red).
          Prints each PR's link and its checks page.
 release  Reads plugin.yaml on the default branch. If v<version> has no
-         release and is newer than the latest, creates it; the release
-         workflow then tests, signs (waits for your approval) and attaches
-         the zip. Prints the release link and the release workflow run.
+         release and is newer than the latest, pushes the tag v<version>;
+         release.yml then tests, signs (waits for your approval) and creates
+         the release with the zip attached, so immutable releases work.
+         Repos still on the older "release published" workflow get the
+         release created instead. Prints the release page and the run.
          Repos still on the template's example plugin are skipped.
 ship     merge, then release. Auto-merge is asynchronous, so a version bump
          that is still in a PR is released on the next run.
@@ -490,12 +492,13 @@ def merge(repo: str, ctx: dict) -> None:
 
 
 def release_run(repo: str, tag: str, wait: int = 0) -> dict | None:
-    """The release workflow run for `tag`; waits up to `wait` seconds for it to start."""
+    """The release workflow run for `tag` (tag push or, before immutable releases, release
+    published); waits up to `wait` seconds for it to start."""
     deadline = time.time() + wait
     while True:
-        runs = api("GET", f"/repos/{repo}/actions/runs?event=release&per_page=10") or {}
+        runs = api("GET", f"/repos/{repo}/actions/runs?branch={tag}&per_page=10") or {}
         for run in runs.get("workflow_runs") or []:
-            if run.get("head_branch") == tag:
+            if run.get("head_branch") == tag and run.get("event") in ("push", "release"):
                 return run
         if time.time() >= deadline:
             return None
@@ -506,6 +509,26 @@ def run_state(run: dict) -> str:
     if run.get("status") == "waiting":
         return "waiting for your approval (plugin-signing)"
     return run.get("conclusion") or run.get("status") or "?"
+
+
+def tag_exists(repo: str, tag: str) -> bool:
+    try:
+        api("GET", f"/repos/{repo}/git/ref/tags/{tag}")
+        return True
+    except RuntimeError as err:
+        if "404" in str(err) or "Not Found" in str(err):
+            return False
+        raise
+
+
+def releases_on_tag_push(repo: str, branch: str) -> bool:
+    """True when release.yml starts on a v* tag push and creates the release itself (the
+    flow for immutable releases); False for the older "release published" flow."""
+    found = get_file(repo, ".github/workflows/release.yml", branch)
+    if not found:
+        return True
+    on = found[0].split("\njobs:", 1)[0]
+    return "release:" not in on and "tags:" in on
 
 
 def release(repo: str, ctx: dict) -> None:
@@ -524,25 +547,50 @@ def release(repo: str, ctx: dict) -> None:
     tag, tags = f"v{ver}", release_tags(repo)
     last = newest(tags)
     page = f"{WEB}/{repo}/releases/tag/{tag}"
+    name = short(repo).removeprefix(PREFIX)
     if tag in tags:
         run = release_run(repo, tag)
         say(f"   {tag} already released\n      {page}")
         if run:
             say(f"      release run: {run_state(run)}\n      {run['html_url']}")
-    elif last and version_tuple(ver) <= version_tuple(last):
+        assets = (api("GET", f"/repos/{repo}/releases/tags/{tag}") or {}).get("assets") or []
+        if not any(a.get("name", "").endswith(".zip") for a in assets):
+            say("      NO SIGNED ZIP: the Marketplace can't install this release. Once releases are"
+                f" immutable it can't be fixed in place; release a new version: hubra bump {name} patch")
+        return
+    if last and version_tuple(ver) <= version_tuple(last):
         say(f"   plugin.yaml says {ver}, not newer than {last}: skipped")
-    elif DRY_RUN:
-        say(f"   [dry-run] release {tag} on {branch} (latest {last or 'none'})\n      would be {page}")
+        return
+    on_tag = releases_on_tag_push(repo, branch)
+    if on_tag and tag_exists(repo, tag):
+        # Tag pushed, release not there yet: the workflow is running, waits for you or failed.
+        run = release_run(repo, tag)
+        say(f"   {tag} is tagged, the workflow creates the release once it is signed")
+        if run:
+            say(f"      release run: {run_state(run)}\n      {run['html_url']}")
+            if run.get("conclusion") == "failure":
+                say("      it failed: fix it, then delete the tag and run release again")
+        return
+    how = "push tag" if on_tag else "publish release"
+    if DRY_RUN:
+        say(f"   [dry-run] {how} {tag} on {branch} (latest {last or 'none'})\n      would be {page}")
+        return
+    if on_tag:
+        # Immutable releases: the workflow tests, signs and then creates the release with the
+        # zip attached, so only the tag is made here (a tag pushed with your token starts it).
+        head = api("GET", f"/repos/{repo}/git/ref/heads/{branch}")["object"]["sha"]
+        api("POST", f"/repos/{repo}/git/refs", {"ref": f"refs/tags/{tag}", "sha": head})
+        say(f"   tagged {tag} on {branch} at {head[:7]} (was {last or 'none'}); the release appears at\n      {page}")
     else:
         gh("release", "create", tag, "--repo", repo, "--target", branch,
            "--title", f"{pid} {ver}", "--notes", f"{pid} {ver}")
         say(f"   released {tag} (was {last or 'none'})\n      {page}")
-        run = release_run(repo, tag, wait=20)
-        if run:
-            say(f"      release run: {run_state(run)}\n      {run['html_url']}")
-        else:
-            say(f"      release run not started yet: {WEB}/{repo}/actions?query=event%3Arelease")
-        say(f"      approve the signing step there or with: hubra approve {short(repo).removeprefix(PREFIX)}")
+    run = release_run(repo, tag, wait=20)
+    if run:
+        say(f"      release run: {run_state(run)}\n      {run['html_url']}")
+    else:
+        say(f"      release run not started yet: {WEB}/{repo}/actions/workflows/release.yml")
+    say(f"      approve the signing step there or with: hubra approve {name}")
 
 
 def ship(repo: str, ctx: dict) -> None:

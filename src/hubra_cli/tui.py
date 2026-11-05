@@ -454,7 +454,7 @@ class HubraTui(App):
         if not g.is_plugin(key):
             self.log_line("Core releases follow docs/release-guidelines.md")
             return
-        self.confirm_then(f"Release {g.short(key)} at the version in plugin.yaml (if it is new)?",
+        self.confirm_then(f"Release {g.short(key)} at the version in plugin.yaml (pushes the tag v<version> if it is new)?",
                           g.release, key, {})
 
     def action_approve(self) -> None:

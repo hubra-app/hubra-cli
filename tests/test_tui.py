@@ -43,7 +43,7 @@ def test_tui_flow(env, monkeypatch):
             await pilot.pause(1.5)
             assert "12 commits behind main" in str(app.query_one("#hubra-detail").render())
             log = [str(line.text) for line in app.query_one("#log").lines]
-            assert any("[dry-run] release v1.2.0" in line for line in log), log
+            assert any("[dry-run] push tag v1.2.0" in line for line in log), log
             assert any("[dry-run] approve hubra-plugin-discord v2.5.0" in line for line in log), log
             assert app.query_one("#prs-table").row_count == 4
 
