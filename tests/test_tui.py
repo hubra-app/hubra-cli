@@ -31,8 +31,11 @@ def test_tui_flow(env, monkeypatch):
             await pilot.press("y")
             await pilot.pause(1.5)
             app.query_one("#tabs").active = "runs"
-            await pilot.pause(0.5)
             runs = app.query_one("#runs-table")
+            for _ in range(40):  # Runs load when their tab opens
+                await pilot.pause(0.25)
+                if runs.row_count:
+                    break
             runs.move_cursor(row=runs.get_row_index("hubra-app/hubra-plugin-discord|555"))
             await pilot.press("a")
             await pilot.pause(0.3)
@@ -100,6 +103,11 @@ def test_keyboard_links_and_theme(env, monkeypatch):
             assert str(app.query_one("#tabs").get_tab("security").label) == "Security (3)"
             detail = str(app.query_one("#security-detail").render())
             assert "critical" in detail and "SQL query built from user input" in detail
+            await pilot.press("3")  # Runs load when their tab opens
+            for _ in range(40):
+                await pilot.pause(0.25)
+                if "to approve" in app.sub_title:
+                    break
             await pilot.press("2")
             assert "2 to approve" in app.sub_title  # discord signing + hubra outside contributor run
             await pilot.press("A")  # auto-merge all ready PRs

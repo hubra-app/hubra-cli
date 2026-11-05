@@ -123,6 +123,8 @@ the browser · `r` refresh · `m` auto-merge · `M` merge now · `y` mark ready 
 pane and the log are short labels you can click. Every change asks first;
 `hubra tui --dry-run` only shows what it would do.
 
+Nothing reloads on its own, to stay well inside GitHub's rate limit. Repos and Pull requests come from one GraphQL query at the start. Runs and Security, which cost API calls per repo, load the first time you open their tab. `r` reloads the tab you are on. gh caches the same answer for 60 seconds, the header shows how many API calls are left, and a rate limit tells you when it resets.
+
 ![Repo settings drift in the Checks tab](docs/screenshots/checks-doctor.png)
 
 ## As a bnb plugin

@@ -12,6 +12,10 @@ Start it with `hubra tui`; it needs the [tui] extra (README › Install) or
   Hubra          health, alerts, errors, jobs and token of the running Hubra
                  (needs a token: `hubra login` or HUBRA_TOKEN)
 
+Nothing reloads on its own: Repos and Pull requests (one GraphQL query) load at the
+start, Runs and Security (API calls per repo) the first time you open their tab, and
+r reloads the tab you are on. The header shows the GitHub API calls left.
+
 Keys: ← → or 1-6 switch tabs · ↑ ↓ move · Enter or o open in browser · r refresh
 · m auto-merge · M merge now · A auto-merge all ready PRs · v filter PRs
 (auto-merge, recently merged, drafts) · y mark ready · d diff · b bump
@@ -210,6 +214,7 @@ class Pick(ModalScreen[str]):
         self.dismiss("")
 
 
+CACHE = "60s"  # gh answers the same GET from its cache for this long
 PR_FILTERS = [("all", "all open"), ("auto", "auto-merge"), ("merged", "recently merged"), ("drafts", "drafts")]
 
 
@@ -274,6 +279,9 @@ class HubraTui(App):
         self.info: dict[str, dict] = {}
         self.last_summary = ""
         self.last_waiting = 0
+        self.loaded: dict[str, float] = {}  # tab -> when its data was loaded
+        self.force = False
+        self.rate = ""
         self.pr_filter = "all"
         self.alerts: dict[str, tuple[list[dict], list[str]]] = {}
         self.last_alerts = 0
@@ -315,9 +323,6 @@ class HubraTui(App):
         self.log_line("Loading … ← → or 1-6 switch tabs, ↑ ↓ move, Enter opens, r refreshes, q quits")
         self.focus_table()
         self.load_github()
-        self.load_runs()
-        self.load_security()
-        self.set_interval(120, self.action_refresh)
 
     def log_line(self, text: str) -> None:
         line = Text(time.strftime("%H:%M:%S "), style="dim")
@@ -346,7 +351,6 @@ class HubraTui(App):
 
     def action_toggle_theme(self) -> None:
         self.theme = "hubra-light" if self.theme == "hubra" else "hubra"
-        self.action_refresh()
 
     def action_open_link(self, url: str) -> None:
         mode = g.open_mode()
@@ -398,6 +402,9 @@ class HubraTui(App):
             self.repos = [g.full(c) for c in g.CORE] + [g.full(n) for n in names]
             rows = g.status_rows(self.repos)
             info = g.org_repos(full_info=True)
+        except g.RateLimited as err:
+            self.call_from_thread(self.rate_limited, err)
+            return
         except RuntimeError as err:
             self.call_from_thread(self.log_line, f"GitHub: {err}")
             return
@@ -406,6 +413,8 @@ class HubraTui(App):
             for p in ((info.get(g.short(repo)) or {}).get("pullRequests") or {}).get("nodes") or []:
                 prs[f"{repo}#{p['number']}"] = dict(p, repo=repo)
         self.call_from_thread(self.fill_github, rows, prs, info)
+        self.call_from_thread(self.load_tab_data)
+        self.check_rate()
 
     def fill_github(self, rows: list[list[str]], prs: dict[str, dict], info: dict) -> None:
         with contextlib.suppress(NoMatches):  # the app is closing
@@ -476,11 +485,15 @@ class HubraTui(App):
 
     @work(thread=True, exclusive=True, group="security")
     def load_security(self) -> None:
+        self.loaded["security"] = time.time()
         try:
             repos = self.repos or [g.full(c) for c in g.CORE] + [g.full(n) for n in g.plugin_names()]
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(g.WORKERS) as pool:
                 found = dict(zip(repos, pool.map(g.repo_alerts, repos)))
+        except g.RateLimited as err:
+            self.call_from_thread(self.rate_limited, err)
+            return
         except RuntimeError as err:
             self.call_from_thread(self.log_line, f"Security: {err}")
             return
@@ -533,6 +546,7 @@ class HubraTui(App):
 
     @work(thread=True, exclusive=True, group="runs")
     def load_runs(self) -> None:
+        self.loaded["runs"] = time.time()
         try:
             repos = self.repos or [g.full(c) for c in g.CORE] + [g.full(n) for n in g.plugin_names()]
             waiting = g.all_waiting(repos)
@@ -544,10 +558,14 @@ class HubraTui(App):
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(g.WORKERS) as pool:
                 last = list(pool.map(latest, repos))
+        except g.RateLimited as err:
+            self.call_from_thread(self.rate_limited, err)
+            return
         except RuntimeError as err:
             self.call_from_thread(self.log_line, f"Runs: {err}")
             return
         self.call_from_thread(self.fill_runs, waiting, last)
+        self.check_rate()
 
     def fill_runs(self, waiting, last) -> None:
         with contextlib.suppress(NoMatches):  # the app is closing
@@ -578,8 +596,7 @@ class HubraTui(App):
         if len(waiting) != self.last_waiting and waiting:
             self.log_line(f"{len(waiting)} run(s) wait for your approval: Runs tab (3), key a")
         self.last_waiting = len(waiting)
-        base = "dry run: nothing changes" if self.dry_run else "hubra-app"
-        self.sub_title = f"{base} · {len(waiting)} to approve (3, a)" if waiting else base
+        self.update_title()
         with contextlib.suppress(NoMatches):
             tabs = self.query_one("#tabs", TabbedContent)
             tabs.get_tab("runs").label = f"Runs ({len(waiting)} to approve)" if waiting else "Runs"
@@ -597,7 +614,34 @@ class HubraTui(App):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         self.update_detail()
 
+    def load_tab_data(self) -> None:
+        """Runs and security cost API calls per repo: they load the first time you open their tab, then on r."""
+        tab, force, self.force = self.tab(), self.force, False
+        if tab in ("runs", "security") and (force or tab not in self.loaded):
+            (self.load_runs if tab == "runs" else self.load_security)()
+
+    def rate_limited(self, err) -> None:
+        self.log_line(f"{err}. r tries again.")
+        self.show_rate({"core": {"remaining": 0}})
+
+    @work(thread=True, exclusive=True, group="rate")
+    def check_rate(self) -> None:
+        self.call_from_thread(self.show_rate, g.rate_limit())
+
+    def show_rate(self, limits: dict) -> None:
+        rest = (limits.get("core") or {}).get("remaining")
+        gql = (limits.get("graphql") or {}).get("remaining")
+        self.rate = "" if rest is None else f"API {rest}" + (f" · GraphQL {gql}" if gql is not None else "") + " left"
+        self.update_title()
+
+    def update_title(self) -> None:
+        base = "dry run: nothing changes" if self.dry_run else "hubra-app"
+        bits = [base] + ([f"{self.last_waiting} to approve (3, a)"] if self.last_waiting else [])
+        self.sub_title = " · ".join(bits + ([self.rate] if self.rate else []))
+
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        g.CACHE = CACHE
+        self.load_tab_data()
         self.focus_table()
         self.update_detail()
 
@@ -683,10 +727,11 @@ class HubraTui(App):
     # ── actions ───────────────────────────────────────────────────────────
 
     def action_refresh(self) -> None:
+        """r: the tab you are on, fresh (Repos and the PR list are one GraphQL query)."""
         self.detail_cache.clear()
+        g.CACHE = None  # r means fresh: no answers from gh's cache
+        self.force = True
         self.load_github()
-        self.load_runs()
-        self.load_security()
         if self.tab() in ("hubra", "checks"):
             self.update_detail()
 
@@ -944,5 +989,7 @@ class HubraTui(App):
 
 def run(dry_run: bool = False) -> None:
     g.DRY_RUN = dry_run
+    g.CACHE = CACHE
+    g.WORKERS = 4  # fewer calls at once: GitHub's secondary rate limit watches bursts
     HubraTui(dry_run=dry_run).run()
 
