@@ -3,12 +3,13 @@
 With bitsandbricks-cli installed next to hubra-cli (`pipx inject bitsandbricks-cli hubra-cli`),
 bnb gets the Hubra parts:
 
-  commands     bnb release | ship | bump | verify | key | setup | lists | hubra | login | logout
-               (the same as the hubra command; bnb does status, prs, merge, doctor, sync, ...)
+  commands     bnb ship | verify | key | setup | lists | hubra | login | logout
+               (the same as the hubra command; bnb itself does bump, release, status, prs, merge,
+               doctor, sync, ... with the version files bitsandbricks.toml names)
   status       version (plugin.yaml, or app/backend/pyproject.toml for hubra) and what is left to release
   doctor       the plugin-signing environment, HUBRA_SIGNING_KEY, release.yml
   TUI          Hubra tab (health, alerts, errors, jobs, token), Checks › Plugin lists and
-               Release zips, keys b bump · R release · S ship (plugins and hubra), the Hubra themes
+               Release zips, key S ship (plugins), the Hubra themes. b and R (bump, release) are bnb's own.
 
 The class doesn't import bitsandbricks: bnb only needs these methods, so hubra-cli
 works (and tests) without bnb installed.
@@ -22,9 +23,7 @@ import contextlib
 from hubra_cli import cli
 
 COMMANDS = {
-    "release": "tag plugins at the version in plugin.yaml (hubra release)",
     "ship": "merge a plugin's ready PRs, then release it",
-    "bump": "PR with the next plugin version and changelog",
     "verify": "check release zips against Hubra.pub",
     "key": "store HUBRA_SIGNING_KEY in plugin-signing",
     "setup": "create or set up a plugin repo from the template",
@@ -127,12 +126,10 @@ class HubraPlugin:
         return [("hubra-lists", "Plugin lists", lists), ("hubra-verify", "Release zips", verify)]
 
     def tui_keys(self) -> list:
-        return [("b", "Bump", self.bump), ("R", "Release", self.release), ("S", "Ship", self.ship)]
+        return [("S", "Ship", self.ship)]
 
     def tui_commands(self) -> list:
-        return [("Bump plugin version", "b · PR with the next version and changelog", self.bump),
-                ("Release plugin", "R · push the tag for the version in plugin.yaml", self.release),
-                ("Ship plugin", "S · merge its ready PRs, then release", self.ship),
+        return [("Ship plugin", "S · merge its ready PRs, then release", self.ship),
                 ("Hubra login", "save a Hubra API token for the Hubra tab", self.login)]
 
     def tui_themes(self) -> list:
@@ -148,36 +145,6 @@ class HubraPlugin:
             app.log_line(f"{verb}: pick a Hubra plugin or hubra in the Repos tab first")
             return None
         return repo
-
-    def bump(self, app) -> None:
-        repo = self.plugin_repo(app, "b bumps a plugin's version")
-        if not repo:
-            return
-        name = cli.short(repo).removeprefix(cli.PREFIX)
-        options = [(f"{lvl}{'+auto' if auto else ''}", f"{lvl}{' and auto-merge the PR' if auto else ''}")
-                   for auto in (False, True) for lvl in ("patch", "minor", "major")]
-
-        def chosen(choice: str | None) -> None:
-            if choice:
-                level, _, auto = choice.partition("+")
-                app.log_line(f"bump {name} {level}{' (auto-merge)' if auto else ''} …")
-                app.do_job(self.with_dry_run(app, cli.for_each), [repo], cli.bump,
-                           {"level": level, "auto": bool(auto)}, False)
-        if repo in cli.CORE_VERSION:
-            question = (f"Bump {name}: open a PR with the next version in {cli.CORE_VERSION[repo][0]}\n"
-                        "and [Unreleased] of the changelogs moved to its section.")
-        else:
-            question = (f"Bump {name}: open a PR with the next version in plugin.yaml and a\n"
-                        "CHANGELOG section of the PRs merged since the last release.")
-        app.pick(question, options, chosen)
-
-    def release(self, app) -> None:
-        repo = self.plugin_repo(app, "R releases a plugin")
-        if repo:
-            where = cli.CORE_VERSION[repo][0] if repo in cli.CORE_VERSION else "plugin.yaml"
-            app.confirm_then(f"Release {cli.short(repo)} at the version in {where}?\n"
-                             "(pushes the tag v<version> if it is new; the workflow builds the release)",
-                             self.with_dry_run(app, cli.release), repo, {})
 
     def ship(self, app) -> None:
         repo = self.plugin_repo(app, "S ships a plugin")

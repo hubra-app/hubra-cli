@@ -147,7 +147,7 @@ pipx inject bitsandbricks-cli "git+https://github.com/hubra-app/hubra-cli"
 bnb init bitsandbricks-ch/bitsandbricks-defaults
 ```
 
-bnb then has `release`, `ship`, `bump`, `verify`, `key`, `setup`, `lists`, `hubra`, `login` and `logout` from here, plugin.yaml columns in `bnb status`, the plugin-signing checks in `bnb doctor`, and in `bnb tui` the Hubra tab, Checks › Plugin lists and Release zips, keys b, R and S, and the Hubra themes (t). The `hubra` command keeps working on its own.
+bnb then has `ship`, `verify`, `key`, `setup`, `lists`, `hubra`, `login` and `logout` from here, plugin.yaml columns in `bnb status`, the plugin-signing checks in `bnb doctor`, and in `bnb tui` the Hubra tab, Checks › Plugin lists and Release zips, key S (ship) and the Hubra themes (t). Bumping and releasing are bnb's own (`bnb bump`, `bnb release`, b and R in the TUI), driven by the version files that bitsandbricks-defaults names for the plugins and for hubra. The `hubra` command keeps working on its own, with its `bump` and `release`.
 
 ## Development
 
