@@ -12,7 +12,8 @@ Start it with `hubra tui`; it needs the [tui] extra (README › Install) or
 
 Keys: 1-5 switch tabs · arrows move · Enter or o open in browser · r refresh
 · m auto-merge · M merge now · y mark ready · d diff · R release · a approve
-signing · t light/dark · q quit. Links in the detail pane and the log open on
+signing · f fix drift and s sync files (Checks › Repo settings) · t light/dark
+· q quit. Links in the detail pane and the log open on
 click. Every action that changes something asks first; with --dry-run it only
 shows what it would do.
 """
@@ -49,7 +50,7 @@ from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 
 from hubra_cli import cli as g
 
-CHECKS = [("lists", "Plugin lists"), ("doctor", "Repo settings")]
+CHECKS = [("lists", "Plugin lists"), ("doctor", "Repo settings"), ("verify", "Release zips")]
 
 HUBRA_SECTIONS = [
     ("health", "Health", "/app/platform/diagnostics"),
@@ -186,6 +187,8 @@ class HubraTui(App):
         Binding("d", "diff", "Diff"),
         Binding("R", "release", "Release"),
         Binding("a", "approve", "Approve"),
+        Binding("f", "fix", "Fix drift", show=False),
+        Binding("s", "sync", "Sync files", show=False),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -468,8 +471,11 @@ class HubraTui(App):
             text = g.capture(g.HUBRA_VIEWS[key])
         elif key == "lists":
             text = g.capture(g.lists, False)
+        elif key == "verify":
+            text = g.capture(g.for_each, [r for r in self.repos if g.is_plugin(r)], g.verify, {})
         else:
-            text = g.capture(g.doctor_all, [r for r in self.repos if g.is_plugin(r)])
+            text = g.capture(g.doctor_all, self.repos)
+            text += "\nf applies the fixes (doctor --fix) · s opens PRs with the template's files (sync)\n"
         self.detail_cache[f"{tab}:{key}"] = text
         self.call_from_thread(self.show_if_current, tab, key, text)
 
@@ -502,6 +508,24 @@ class HubraTui(App):
         else:
             url = g.MANAGE + {k: path for k, _, path in HUBRA_SECTIONS}[key]
         self.action_open_link(url)
+
+    def action_fix(self) -> None:
+        if self.tab() != "checks" or self.current_key() != "doctor":
+            self.log_line("f fixes drift from the Checks tab › Repo settings")
+            return
+        self.confirm_then("Apply the template's settings and rulesets (and each repo's own rulesets files)\n"
+                          "to every repo that drifted? (hubra doctor --fix)", g.doctor_all, list(self.repos), True)
+
+    def action_sync(self) -> None:
+        if self.tab() != "checks" or self.current_key() != "doctor":
+            self.log_line("s syncs files from the Checks tab › Repo settings")
+            return
+        plugins = [r for r in self.repos if g.is_plugin(r)]
+
+        def sync_all(repos) -> None:
+            g.for_each(repos, g.sync, g.sync_ctx())
+        self.confirm_then("Open a PR in each plugin whose shared files (release.yml, rulesets, SECURITY.md, ...)\n"
+                          "differ from the template? (hubra sync)", sync_all, plugins)
 
     def confirm_then(self, question: str, job, *args) -> None:
         if self.dry_run:

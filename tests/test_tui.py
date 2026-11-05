@@ -50,6 +50,14 @@ def test_tui_flow(env, monkeypatch):
     asyncio.run(run())
 
 
+async def settle(pilot, app, seconds: float = 20) -> None:
+    """Wait until the Checks detail has loaded."""
+    for _ in range(int(seconds * 4)):
+        await pilot.pause(0.25)
+        if "…" not in str(app.query_one("#checks-detail").render()):
+            return
+
+
 def test_keyboard_links_and_theme(env, monkeypatch):
     for key in ("PATH", "FAKE_GH_DELAY", "FAKE_GH_LOG", "HUBRA_API_URL", "HUBRA_TOKEN"):
         monkeypatch.setenv(key, env[key])
@@ -81,6 +89,21 @@ def test_keyboard_links_and_theme(env, monkeypatch):
             assert text.plain == "PR hubra-plugin-budgets/pull/12 done"
             meta = [span.style.meta for span in text.spans if hasattr(span.style, "meta")]
             assert meta == [{"@click": "app.open_link('https://github.com/hubra-app/hubra-plugin-budgets/pull/12')"}]
+            await pilot.press("4", "down")  # Checks › Repo settings
+            await settle(pilot, app)
+            assert "f applies the fixes" in str(app.query_one("#checks-detail").render())
+            await pilot.press("f")
+            await pilot.pause(0.3)
+            await pilot.press("y")
+            for _ in range(80):
+                await pilot.pause(0.25)
+                log = [str(line.text) for line in app.query_one("#log").lines]
+                if any("fixed" in line for line in log):
+                    break
+            assert any("[dry-run] PATCH /repos/hubra-app/hubra-plugin-budgets" in line for line in log), log
+            await pilot.press("down")  # Release zips
+            await settle(pilot, app)
+            assert "NO SIGNED ZIP" in str(app.query_one("#checks-detail").render())
             app.action_open_link("https://example.org/x")
             assert opened[-1] == "https://example.org/x"
             await pilot.press("t")

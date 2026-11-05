@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def hubra(env, *args) -> str:
     proc = subprocess.run([sys.executable, "-m", "hubra_cli", *args], env=env, capture_output=True,
@@ -129,13 +131,13 @@ def test_lists(env):
 def test_doctor(env):
     out = hubra(env, "doctor")
     assert "has_wiki is true, template has false" in out and "ruleset tags is missing" in out
-    assert "fix: hubra setup budgets" in out
+    assert "fix: hubra doctor --fix budgets" in out
     assert "release immutability is off, template has on" in out  # keys
     assert "ruleset main: pull_request.required_approving_review_count is 1, template has 0" in out  # guides
     assert "ruleset tags: lacks non_fast_forward, update" in out  # codes
     assert "== hubra-app/hubra-plugins-template (the reference)\n   ok" in out
     assert "ruleset nightly (.github/rulesets/nightly.json) isn't imported" in out  # booking's own ruleset
-    assert "hubra-plugin-booking/settings/rules" in out
+    assert "fix: hubra doctor --fix booking" in out
     assert "release.yml differs from the template's" in out
     assert "fix: hubra key <keyfile> discord" in out
     assert "== hubra-app/hubra\n   ok" in hubra(env, "doctor", "hubra")
@@ -155,3 +157,69 @@ def test_release_old_workflow_and_pending_tag(env):
     assert "[dry-run] publish release v1.1.0" in out  # codes: release.yml still on "published"
     assert "v1.1.0 is tagged, the workflow creates the release" in out  # teams
     assert "NO SIGNED ZIP" in out  # discord's release has no zip
+
+
+def test_sync_opens_a_pr_per_drifted_plugin(env):
+    out = hubra(env, "sync", "codes", "keys", "budgets", "--dry-run")
+    assert ("== hubra-app/hubra-plugin-codes\n   update .github/workflows/release.yml\n"
+            "   [dry-run] PR on sync/template-headsha") in out
+    assert "add SECURITY.md" in out
+    assert "== hubra-app/hubra-plugin-budgets\n   in sync with the template" in out
+    assert "PR: https://github.com" in hubra(env, "sync", "keys")
+    assert "in sync" in hubra(env, "sync", "keys", "--only", "LICENSE", "--dry-run")
+    assert "not in the template: nope.txt" in hubra(env, "sync", "--only", "nope.txt")
+
+
+def test_doctor_fix(env):
+    out = hubra(env, "doctor", "budgets", "--fix", "--dry-run")
+    assert "[dry-run] PATCH /repos/hubra-app/hubra-plugin-budgets" in out
+    assert "[dry-run] POST /repos/hubra-app/hubra-plugin-budgets/rulesets" in out
+    assert "fixed 2" in out
+
+
+def test_verify_release_zip(env, tmp_path):
+    junk = tmp_path / "budgets-1.1.0.zip"
+    junk.write_bytes(b"not a zip")
+    out = hubra({**env, "FAKE_GH_ZIP": str(junk)}, "verify", "discord", "budgets")
+    assert "v2.5.0: NO SIGNED ZIP" in out
+    assert "v1.1.0 budgets-1.1.0.zip: NOT OK" in out and "not a zip file" in out
+    assert "budgets-1.1.0.zip doesn't match budgets-1.1.0.zip.sha256" in out
+
+
+def test_check_zip_signature(tmp_path):
+    import base64
+    import hashlib
+    import io
+    import json
+    import zipfile
+
+    pytest.importorskip("cryptography")
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from hubra_cli import cli
+
+    key = Ed25519PrivateKey.generate()
+    pub = base64.b64encode(key.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)).decode()
+    files = {"plugin.yaml": b"id: demo\nversion: 1.2.0\n", "demo/__init__.py": b"x = 1\n"}
+
+    def make(files, tamper=None):
+        hashes = {k: hashlib.sha256(v).hexdigest() for k, v in files.items()}
+        payload = json.dumps({"id": "demo", "version": "1.2.0", "files": hashes},
+                             sort_keys=True, separators=(",", ":")).encode()
+        sig = {"id": "demo", "version": "1.2.0", "key_id": cli.plugin_key_id(pub), "files": hashes,
+               "signature": base64.b64encode(key.sign(payload)).decode()}
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for k, v in {**files, **(tamper or {})}.items():
+                zf.writestr(f"demo/{k}", v)
+            zf.writestr("demo/SIGNATURE.json", json.dumps(sig))
+            zf.writestr("demo/demo/__pycache__/x.pyc", b"ignored")
+        return buf.getvalue()
+
+    assert cli.check_zip(make(files), "v1.2.0", pub) == []
+    assert "files differ from what was signed: demo/__init__.py" in cli.check_zip(
+        make(files, {"demo/__init__.py": b"evil()\n"}), "v1.2.0", pub)
+    assert "tag v1.3.0 but plugin.yaml version 1.2.0" in cli.check_zip(make(files), "v1.3.0", pub)
+    assert any("not Hubra.pub" in p for p in cli.check_zip(make(files), "v1.2.0"))  # the real key

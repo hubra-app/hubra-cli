@@ -63,6 +63,12 @@ bump     Opens a PR on release/v<new> that sets plugin.yaml to the next
          version (minor by default; major, patch or 1.4.0) and adds a
          CHANGELOG.md section listing the PRs merged since the last release.
          --auto-merge merges it once checks pass; then `release` publishes.
+sync     Opens one PR per plugin that copies the template's shared files
+         (SYNC_FILES: release.yml, rulesets, PR template, SECURITY.md, ...)
+         where they differ. --only PATH limits it to some files.
+verify   Downloads the latest release zip of each plugin (or --tag v1.2.0)
+         and checks it like Hubra does: SHA-256 file, SIGNATURE.json signed
+         with Hubra.pub, every file hash, id and version against the tag.
 lists    Compares the latest release of each plugin with the hubra README,
          the Marketplace README, the org profile and the hubra.club Modules
          cards. --fix opens PRs for outdated versions in the two READMEs
@@ -95,6 +101,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -200,6 +207,15 @@ def api(method: str, path: str, body: dict | None = None):
         args += ["--input", "-"]
     out = gh(*args, stdin=json.dumps(body) if body is not None else None)
     return json.loads(out) if out.strip() else None
+
+
+def download(path: str) -> bytes:
+    """Bytes of a release asset (REST /releases/assets/<id>), through gh so private repos work too."""
+    proc = subprocess.run(["gh", "api", path, "-H", "Accept: application/octet-stream"],
+                          capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"gh api {path}: {proc.stderr.decode(errors='replace').strip()[:300]}")
+    return proc.stdout
 
 
 def graphql(query: str, **variables) -> dict:
@@ -382,20 +398,20 @@ def set_key(repo: str, key: str) -> None:
 # ── setup ────────────────────────────────────────────────────────────────────
 
 
-def setup(repo: str, ctx: dict) -> None:
-    name = short(repo).removeprefix(PREFIX)
-    if not exists(repo):
-        if name not in NEW_PLUGINS:
-            raise RuntimeError("does not exist and is not in NEW_PLUGINS")
-        if DRY_RUN:
-            say(f"   [dry-run] gh repo create {repo} --public --template {TEMPLATE}")
+def import_rulesets(repo: str, rulesets: dict[str, dict], current: dict[str, int] | None = None) -> None:
+    """Create or replace (by name) each ruleset."""
+    if current is None:
+        current = {r["name"]: r["id"] for r in api("GET", f"/repos/{repo}/rulesets") or []}
+    for name, ruleset in rulesets.items():
+        body = {k: ruleset[k] for k in RULESET_FIELDS if k in ruleset}
+        if name in current:
+            api("PUT", f"/repos/{repo}/rulesets/{current[name]}", body)
         else:
-            gh("repo", "create", repo, "--public", "--template", TEMPLATE,
-               "--description", NEW_PLUGINS[name])
-            time.sleep(5)  # GitHub copies the template in the background
-        say("   created from the template")
+            api("POST", f"/repos/{repo}/rulesets", body)
 
-    tpl = ctx["template"]
+
+def copy_template(repo: str, tpl: dict) -> None:
+    """Settings, security, release immutability and rulesets of the template, plus the repo's own extra rulesets."""
     api("PATCH", f"/repos/{repo}", {
         **{k: tpl["settings"][k] for k in REPO_SETTINGS if k in tpl["settings"]},
         "security_and_analysis": {k: {"status": v} for k, v in tpl["security"].items() if k in PATCHABLE_SECURITY},
@@ -411,23 +427,29 @@ def setup(repo: str, ctx: dict) -> None:
         current = {r["name"]: r["id"] for r in api("GET", f"/repos/{repo}/rulesets") or []}
     except RuntimeError:
         current = {}  # dry run of a repo that doesn't exist yet
-    for ruleset in tpl["rulesets"].values():
-        body = {k: ruleset[k] for k in RULESET_FIELDS if k in ruleset}
-        if ruleset["name"] in current:
-            api("PUT", f"/repos/{repo}/rulesets/{current[ruleset['name']]}", body)
-        else:
-            api("POST", f"/repos/{repo}/rulesets", body)
+    import_rulesets(repo, tpl["rulesets"], current)
     say(f"   settings, security, release immutability and rulesets ({', '.join(tpl['rulesets'])}) "
         "copied from the template")
     custom = {n: rs for n, (_, rs) in ruleset_files(repo).items() if n not in tpl["rulesets"] and not rs.get("_broken")}
-    for name, ruleset in custom.items():
-        body = {k: ruleset[k] for k in RULESET_FIELDS if k in ruleset}
-        if name in current:
-            api("PUT", f"/repos/{repo}/rulesets/{current[name]}", body)
-        else:
-            api("POST", f"/repos/{repo}/rulesets", body)
+    import_rulesets(repo, custom, current)
     if custom:
         say(f"   the repo's own rulesets ({', '.join(custom)}) imported from .github/rulesets")
+
+
+def setup(repo: str, ctx: dict) -> None:
+    name = short(repo).removeprefix(PREFIX)
+    if not exists(repo):
+        if name not in NEW_PLUGINS:
+            raise RuntimeError("does not exist and is not in NEW_PLUGINS")
+        if DRY_RUN:
+            say(f"   [dry-run] gh repo create {repo} --public --template {TEMPLATE}")
+        else:
+            gh("repo", "create", repo, "--public", "--template", TEMPLATE,
+               "--description", NEW_PLUGINS[name])
+            time.sleep(5)  # GitHub copies the template in the background
+        say("   created from the template")
+
+    copy_template(repo, ctx["template"])
 
     api("PUT", f"/repos/{repo}/environments/plugin-signing", {
         "reviewers": [{"type": "User", "id": ctx["me"]["id"]}],
@@ -1210,18 +1232,33 @@ def doctor_ctx() -> dict:
     return {"template": template_baseline()}
 
 
-def doctor_all(repos: list[str]) -> None:
+def doctor_all(repos: list[str], fix: bool = False) -> None:
     ctx = doctor_ctx()
+    ctx["fix"] = fix
     say(f"== {TEMPLATE} (the reference)")
-    template_self_check(ctx["template"])
+    template_self_check(ctx["template"], fix)
     for_each(repos, doctor, ctx)
 
 
-def template_self_check(tpl: dict) -> None:
-    """The template's live rulesets against its .github/rulesets files, and what `hubra merge` needs."""
+def template_self_check(tpl: dict, fix: bool = False) -> None:
+    """The template's live rulesets against its .github/rulesets files, and what `hubra merge` needs.
+
+    With fix, imports the files and sets PLUGIN_SETTINGS on the template first, so
+    the plugins are then compared with (and fixed to) the corrected template."""
     problems = files_drift(tpl["rulesets"], tpl.get("files") or {})
     settings = [f"{k} is {compact(tpl['settings'].get(k))}, plugins should have {compact(v)}"
                 for k, v in PLUGIN_SETTINGS.items() if k in tpl["settings"] and tpl["settings"][k] != v]
+    if fix and problems:
+        import_rulesets(TEMPLATE, {n: rs for n, (_, rs) in tpl["files"].items() if not rs.get("_broken")})
+        say(f"   rulesets ({', '.join(tpl['files'])}) imported from .github/rulesets")
+        if not DRY_RUN:
+            tpl["rulesets"] = live_rulesets(TEMPLATE)
+        problems = []
+    if fix and settings:
+        api("PATCH", f"/repos/{TEMPLATE}", PLUGIN_SETTINGS)
+        tpl["settings"].update({k: v for k, v in PLUGIN_SETTINGS.items() if k in tpl["settings"]})
+        say(f"   set {', '.join(PLUGIN_SETTINGS)} on the template")
+        settings = []
     for p in problems + settings:
         say(f"   - {p}")
     if problems:
@@ -1237,15 +1274,29 @@ def template_self_check(tpl: dict) -> None:
 def doctor(repo: str, ctx: dict) -> None:
     problems: list[str] = []
     own = ruleset_files(repo)
+    fixable: list[str] = []
     if is_plugin(repo):
         state = repo_state(repo)
-        problems += state_drift(state, ctx["template"], own)
-        problems += files_drift(state["rulesets"], own, ctx["template"].get("files"))
+        fixable = state_drift(state, ctx["template"], own)
+        missing = {n for n in ctx["template"]["rulesets"] if n not in state["rulesets"]}  # reported once above
+        fixable += [p for p in files_drift(state["rulesets"], own)
+                    if p not in fixable and not any(p.startswith(f"ruleset {n} (") for n in missing)]
+        problems += fixable
+        problems += [p for p in files_drift({}, own, ctx["template"].get("files")) if "differs from the template" in p]
     else:  # core repos keep their own settings; their rulesets follow their own files
         live = live_rulesets(repo)
-        problems += files_drift(live, own)
+        fixable = files_drift(live, own)
+        problems += fixable
         if own:
             problems += [f"ruleset {n} has no file in .github/rulesets" for n in sorted(set(live) - set(own))]
+    if fixable and ctx.get("fix"):
+        if is_plugin(repo):
+            copy_template(repo, ctx["template"])
+        else:
+            import_rulesets(repo, {n: rs for n, (_, rs) in own.items() if not rs.get("_broken")})
+            say(f"   rulesets ({', '.join(own)}) imported from .github/rulesets")
+        problems = [p for p in problems if p not in fixable]
+        say(f"   fixed {len(fixable)} (hubra doctor shows what is left)")
         info = api("GET", f"/repos/{repo}")
         sec = info.get("security_and_analysis") or {}
         for key in ("secret_scanning", "secret_scanning_push_protection"):
@@ -1282,13 +1333,172 @@ def doctor(repo: str, ctx: dict) -> None:
         return
     for p in problems:
         say(f"   - {p}")
-    if any(".github/rulesets/" in p or ".json has" in p for p in problems):
-        say(f"   fix: {WEB}/{repo}/settings/rules (import the repo's .github/rulesets files)")
-    if any("HUBRA_SIGNING_KEY" in p for p in problems) and len(problems) == 1:
-        say(f"   fix: hubra key <keyfile> {short(repo).removeprefix(PREFIX)}")
-    elif is_plugin(repo):
-        say(f"   fix: hubra setup {short(repo).removeprefix(PREFIX)}  (copies the template)"
-            + ("   (release.yml: copy it from the template)" if any("release.yml" in p for p in problems) else ""))
+    name = short(repo).removeprefix(PREFIX) if is_plugin(repo) else short(repo)
+    if any(p in fixable for p in problems):
+        say(f"   fix: hubra doctor --fix {name}")
+    if any("differs from the template" in p or "no .github/workflows" in p for p in problems):
+        say(f"   fix: hubra sync {name}  (PR with the template's files)")
+    if any("plugin-signing" in p for p in problems):
+        say(f"   fix: hubra setup {name}  (plugin-signing environment)")
+    if any("HUBRA_SIGNING_KEY" in p for p in problems):
+        say(f"   fix: hubra key <keyfile> {name}")
+
+
+# ── sync with the template ───────────────────────────────────────────────────
+
+# Files every plugin shares with the template. The rest (plugin code, README,
+# CHANGELOG, .releaseignore) belongs to the plugin.
+SYNC_FILES = (".gitattributes", ".gitignore", ".github/pull_request_template.md", ".github/rulesets/main.json",
+              ".github/rulesets/tags.json", ".github/workflows/release.yml", "LICENSE", "SECURITY.md")
+
+
+def blob_shas(repo: str, ref: str = "main") -> dict[str, str]:
+    """{path: blob sha} of every file on `ref`, in one call."""
+    t = api("GET", f"/repos/{repo}/git/trees/{ref}?recursive=1") or {}
+    return {e["path"]: e["sha"] for e in t.get("tree") or [] if e.get("type") == "blob"}
+
+
+def sync_ctx(only: list[str] | None = None) -> dict:
+    head = api("GET", f"/repos/{TEMPLATE}/git/ref/heads/main")["object"]["sha"]
+    shas = blob_shas(TEMPLATE, head)
+    paths = [p for p in (only or SYNC_FILES) if p in shas]
+    missing = [p for p in (only or []) if p not in shas]
+    if missing:
+        raise RuntimeError(f"not in the template: {', '.join(missing)}")
+    texts = {}
+    for path in paths:
+        got = get_file(TEMPLATE, path, head)
+        if got:
+            texts[path] = got[0]
+    return {"head": head, "shas": {p: shas[p] for p in texts}, "texts": texts}
+
+
+def sync(repo: str, ctx: dict) -> None:
+    ours = blob_shas(repo)
+    changed = {p: (ctx["texts"][p], ours.get(p)) for p, sha in ctx["shas"].items() if ours.get(p) != sha}
+    if not changed:
+        say("   in sync with the template")
+        return
+    for path, (_, sha) in changed.items():
+        say(f"   {'update' if sha else 'add'} {path}")
+    branch = f"sync/template-{ctx['head'][:7]}"
+    open_prs = api("GET", f"/repos/{repo}/pulls?state=open&head={ORG}:{branch}") or []
+    if open_prs:
+        say(f"   PR already open: {open_prs[0]['html_url']}")
+        return
+    if DRY_RUN:
+        say(f"   [dry-run] PR on {branch} with {len(changed)} file(s)")
+        return
+    lines = "\n".join(f"- `{p}`" for p in changed)
+    url = open_pr(repo, "main", branch, changed,
+                  f"chore: sync shared files with the template ({ctx['head'][:7]})",
+                  "Sync shared files with the template",
+                  f"Copies these files from {TEMPLATE}@{ctx['head'][:7]}:\n\n{lines}\n\n"
+                  "Check the diff for changes this repo made on purpose before merging.\n\n"
+                  "Opened by `hubra sync`.")
+    say(f"   PR: {url}")
+
+
+# ── verify a release ─────────────────────────────────────────────────────────
+
+SIGFILE = "SIGNATURE.json"
+SKIP_PARTS = {"__pycache__", ".git", "node_modules"}
+
+
+def plugin_key_id(pub_b64: str = PLUGIN_PUB) -> str:
+    raw = base64.b64decode(pub_b64)[-32:]  # SubjectPublicKeyInfo of Ed25519: 12-byte header + key
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def check_zip(data: bytes, tag: str, pub_b64: str = PLUGIN_PUB) -> list[str]:
+    """Problems of a plugin zip, checked the way Hubra checks it before installing ([] = fine)."""
+    import io
+    import zipfile
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        return ["not a zip file"]
+    names = [n for n in zf.namelist() if not n.endswith("/")]
+    roots = {n.split("/", 1)[0] for n in names}
+    if len(roots) != 1:
+        return [f"expected one folder in the zip, found {', '.join(sorted(roots)) or 'none'}"]
+    root = roots.pop()
+    files = {}
+    for n in names:
+        rel = n.split("/", 1)[1] if "/" in n else ""
+        parts = rel.split("/")
+        # Hubra hashes every file but SIGNATURE.json, caches and .pyc (trust.file_hashes)
+        if not rel or parts[-1] == SIGFILE or any(x in SKIP_PARTS or x.endswith(".pyc") for x in parts):
+            continue
+        files[rel] = hashlib.sha256(zf.read(n)).hexdigest()
+    try:
+        sig = json.loads(zf.read(f"{root}/{SIGFILE}"))
+    except KeyError:
+        return ["unsigned: no SIGNATURE.json"]
+    except ValueError:
+        return ["SIGNATURE.json isn't valid JSON"]
+    problems = []
+    manifest = parse_manifest(zf.read(f"{root}/plugin.yaml").decode()) if f"{root}/plugin.yaml" in names else None
+    if not manifest:
+        problems.append("no readable plugin.yaml")
+    elif (str(sig.get("id")), str(sig.get("version"))) != (manifest[0], manifest[1]):
+        problems.append(f"signed as {sig.get('id')} {sig.get('version')}, plugin.yaml says {manifest[0]} {manifest[1]}")
+    if manifest and tag.lstrip("v") != manifest[1]:
+        problems.append(f"tag {tag} but plugin.yaml version {manifest[1]}")
+    if sig.get("key_id") != plugin_key_id(pub_b64):
+        problems.append(f"signed with key {sig.get('key_id')}, not Hubra.pub ({plugin_key_id(pub_b64)})")
+    signed = sig.get("files") or {}
+    changed = sorted(set(files) ^ set(signed) | {f for f in files if signed.get(f) not in (None, files[f])})
+    if changed:
+        problems.append(f"files differ from what was signed: {', '.join(changed[:6])}")
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
+        problems.append("can't check the signature itself: pip install cryptography")
+        return problems
+    payload = json.dumps({"id": sig.get("id"), "version": sig.get("version"), "files": signed},
+                         sort_keys=True, separators=(",", ":")).encode()
+    try:
+        Ed25519PublicKey.from_public_bytes(base64.b64decode(pub_b64)[-32:]).verify(
+            base64.b64decode(sig.get("signature") or ""), payload)
+    except (InvalidSignature, ValueError):
+        problems.append("bad signature")
+    return problems
+
+
+def verify(repo: str, ctx: dict) -> None:
+    tag = ctx.get("tag")
+    try:
+        rel = api("GET", f"/repos/{repo}/releases/" + (f"tags/{tag}" if tag else "latest")) or {}
+    except RuntimeError as err:
+        if "404" in str(err) or "Not Found" in str(err):
+            say(f"   no release{' ' + tag if tag else ''}")
+            return
+        raise
+    tag = rel.get("tag_name") or tag
+    assets = {a["name"]: a for a in rel.get("assets") or []}
+    zips = [n for n in assets if n.endswith(".zip")]
+    if not zips:
+        say(f"   {tag}: NO SIGNED ZIP on the release  {rel.get('html_url', '')}")
+        return
+    data = download(f"/repos/{repo}/releases/assets/{assets[zips[0]]['id']}")
+    problems = check_zip(data, tag)
+    sums = assets.get(zips[0] + ".sha256")
+    if sums:
+        want = (download(f"/repos/{repo}/releases/assets/{sums['id']}").decode().split() or [""])[0]
+        if hashlib.sha256(data).hexdigest() != want:
+            problems.insert(0, f"{zips[0]} doesn't match {zips[0]}.sha256")
+    else:
+        problems.append(f"no {zips[0]}.sha256 on the release")
+    if problems:
+        say(f"   {tag} {zips[0]}: NOT OK  {rel.get('html_url', '')}")
+        for p in problems:
+            say(f"   - {p}")
+    else:
+        say(f"   {tag} {zips[0]}: ok, signed with Hubra.pub ({plugin_key_id()}), sha256 matches")
+
 
 
 # ── Hubra API ────────────────────────────────────────────────────────────────
@@ -1518,7 +1728,8 @@ def main() -> None:
                                 epilog=__doc__.split("\n\n", 1)[1])
     sub = p.add_subparsers(dest="cmd", required=True)
     names_help = "plugin short names, hubra, hubra.club, hubra-plugins; name#12 for one PR"
-    for cmd in ("status", "prs", "pr", "merge", "release", "ship", "approve", "runs", "open", "doctor", "setup", "key"):
+    for cmd in ("status", "prs", "pr", "merge", "release", "ship", "approve", "runs", "open", "doctor", "setup", "key",
+                "sync", "verify"):
         sp = sub.add_parser(cmd)
         if cmd == "key":
             sp.add_argument("keyfile", help="private key (PEM) of Hubra.pub")
@@ -1537,6 +1748,13 @@ def main() -> None:
         sp.add_argument("--dry-run", action="store_true")
         if cmd == "setup":
             sp.add_argument("--key", help="also store this signing key")
+        if cmd == "sync":
+            sp.add_argument("--only", action="append", metavar="PATH", help="only this file (repeatable)")
+        if cmd == "verify":
+            sp.add_argument("--tag", help="this release instead of the latest, e.g. v1.2.0")
+        if cmd == "doctor":
+            sp.add_argument("--fix", action="store_true",
+                            help="apply the template's settings and rulesets (and each repo's own) where they drifted")
         if cmd in ("merge", "ship"):
             sp.add_argument("--now", action="store_true", help="merge right away, not via auto-merge")
             sp.add_argument("--ready", action="store_true", help="mark named draft PRs ready first")
@@ -1632,7 +1850,7 @@ def main() -> None:
             sys.exit(f"Unknown: {', '.join(unknown)}")
         if pick and args.cmd not in ("merge", "ship"):
             sys.exit("name#12 works with merge, ship, pr and open")
-    elif args.cmd in ("status", "prs", "runs"):
+    elif args.cmd in ("status", "prs", "runs", "doctor"):
         repos = [full(c) for c in CORE] + [full(n) for n in plugins]
     else:
         repos = [full(n) for n in plugins]
@@ -1650,16 +1868,23 @@ def main() -> None:
     keyfile = getattr(args, "keyfile", None) or getattr(args, "key", None)
     if keyfile:
         ctx["key"] = read_key(keyfile)
-    if args.cmd in ("setup", "key") and any(not is_plugin(r) for r in repos):
-        sys.exit("setup and key are for plugin repos only")
+    if args.cmd in ("setup", "key", "sync", "verify") and any(not is_plugin(r) for r in repos):
+        sys.exit(f"{args.cmd} is for plugin repos only")
+    if args.cmd == "sync":
+        try:
+            ctx.update(sync_ctx(args.only))
+        except RuntimeError as err:
+            sys.exit(str(err))
+    if args.cmd == "verify":
+        ctx["tag"] = args.tag
     if args.cmd == "doctor":
-        return doctor_all(repos)
+        return doctor_all(repos, args.fix)
     if args.cmd == "setup":
         ctx["me"] = api("GET", "/user")
         ctx["template"] = template_baseline()
 
     action = {"setup": setup, "merge": merge, "release": release,
-              "ship": ship, "key": key_only}[args.cmd]
+              "ship": ship, "key": key_only, "sync": sync, "verify": verify}[args.cmd]
     # setup creates repos and key handles the secret: one repo at a time.
     for_each(repos, action, ctx, parallel=args.cmd not in ("setup", "key"))
 
