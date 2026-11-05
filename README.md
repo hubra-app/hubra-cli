@@ -14,8 +14,9 @@ owner of hubra-app (`gh auth login`; if asked: `gh auth refresh -s
 admin:org,workflow`).
 
 ```sh
-pipx install "git+https://github.com/hubra-app/hubra-cli#egg=hubra-cli[tui]"
+pipx install "hubra-cli[tui] @ git+https://github.com/hubra-app/hubra-cli"
 pipx upgrade hubra-cli                 # later, for a new version
+# without the TUI: pipx install git+https://github.com/hubra-app/hubra-cli
 ```
 
 Without the `[tui]` extra everything except `hubra tui` works, using only

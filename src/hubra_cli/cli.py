@@ -1360,7 +1360,7 @@ def main() -> None:
         try:
             from hubra_cli import tui
         except ImportError as err:
-            sys.exit(f"The TUI needs Textual: pipx install 'hubra-cli[tui]' or pip install textual ({err})")
+            sys.exit(f"The TUI needs Textual: pipx inject hubra-cli textual (or pip install textual). {err}")
         return tui.run(dry_run=DRY_RUN)
 
     if args.cmd == "lists":

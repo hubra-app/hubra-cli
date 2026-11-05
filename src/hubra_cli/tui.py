@@ -1,6 +1,7 @@
 """hubra tui: one full-screen view of the hubra-app repos and the running Hubra.
 
-Start it with `hubra tui` (needs the tui extra: `pipx install 'hubra-cli[tui]'`). Tabs:
+Start it with `hubra tui`; it needs the [tui] extra (README › Install) or
+`pipx inject hubra-cli textual`. Tabs:
 
   Repos          version on main, latest release, what's left to release, PRs, CI
   Pull requests  every open PR; the right side shows the selected one in depth
