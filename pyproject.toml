@@ -18,6 +18,10 @@ dev = ["pytest>=8", "ruff>=0.6", "textual>=1.0"]
 [project.scripts]
 hubra = "hubra_cli.cli:main"
 
+# bnb (bitsandbricks-cli) loads this when both are installed: pipx inject bitsandbricks-cli hubra-cli
+[project.entry-points."bitsandbricks.plugins"]
+hubra = "hubra_cli.bnb:HubraPlugin"
+
 [tool.hatch.version]
 path = "src/hubra_cli/__init__.py"
 

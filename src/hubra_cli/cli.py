@@ -1334,27 +1334,7 @@ def doctor(repo: str, ctx: dict) -> None:
             problems.append("private vulnerability reporting is off")
 
     if is_plugin(repo):
-        try:
-            env = api("GET", f"/repos/{repo}/environments/plugin-signing")
-        except RuntimeError:
-            env = None
-        if not env:
-            problems.append("no plugin-signing environment")
-        else:
-            rules = env.get("protection_rules") or []
-            if not any(r.get("type") == "required_reviewers" and r.get("reviewers") for r in rules):
-                problems.append("plugin-signing has no required reviewer")
-            policies = api("GET", f"/repos/{repo}/environments/plugin-signing/deployment-branch-policies") or {}
-            if not any(p.get("name") == "v*" and p.get("type") == "tag" for p in policies.get("branch_policies") or []):
-                problems.append("plugin-signing doesn't limit deployments to v* tags")
-            secrets = api("GET", f"/repos/{repo}/environments/plugin-signing/secrets") or {}
-            if "HUBRA_SIGNING_KEY" not in {s.get("name") for s in secrets.get("secrets") or []}:
-                problems.append("HUBRA_SIGNING_KEY is not stored (hubra key)")
-        ours = get_file(repo, ".github/workflows/release.yml")
-        if ours and ctx["template"].get("workflow") and ours[1] != ctx["template"]["workflow"]:
-            problems.append("release.yml differs from the template's")
-        elif not ours:
-            problems.append("no .github/workflows/release.yml")
+        problems += signing_problems(repo, ctx["template"].get("workflow"))
 
     if not problems:
         say("   ok")
@@ -1364,12 +1344,46 @@ def doctor(repo: str, ctx: dict) -> None:
     name = short(repo).removeprefix(PREFIX) if is_plugin(repo) else short(repo)
     if any(p in fixable for p in problems):
         say(f"   fix: hubra doctor --fix {name}")
+    for hint in signing_hints(name, problems):
+        say(f"   fix: {hint}")
+
+
+def signing_problems(repo: str, template_workflow: str | None) -> list[str]:
+    """What a plugin repo needs to release signed zips: the plugin-signing environment, its key, release.yml."""
+    problems = []
+    try:
+        env = api("GET", f"/repos/{repo}/environments/plugin-signing")
+    except RuntimeError:
+        env = None
+    if not env:
+        problems.append("no plugin-signing environment")
+    else:
+        rules = env.get("protection_rules") or []
+        if not any(r.get("type") == "required_reviewers" and r.get("reviewers") for r in rules):
+            problems.append("plugin-signing has no required reviewer")
+        policies = api("GET", f"/repos/{repo}/environments/plugin-signing/deployment-branch-policies") or {}
+        if not any(p.get("name") == "v*" and p.get("type") == "tag" for p in policies.get("branch_policies") or []):
+            problems.append("plugin-signing doesn't limit deployments to v* tags")
+        secrets = api("GET", f"/repos/{repo}/environments/plugin-signing/secrets") or {}
+        if "HUBRA_SIGNING_KEY" not in {s.get("name") for s in secrets.get("secrets") or []}:
+            problems.append("HUBRA_SIGNING_KEY is not stored (hubra key)")
+    ours = get_file(repo, ".github/workflows/release.yml")
+    if ours and template_workflow and ours[1] != template_workflow:
+        problems.append("release.yml differs from the template's")
+    elif not ours:
+        problems.append("no .github/workflows/release.yml")
+    return problems
+
+
+def signing_hints(name: str, problems: list[str], cmd: str = "hubra") -> list[str]:
+    hints = []
     if any("differs from the template" in p or "no .github/workflows" in p for p in problems):
-        say(f"   fix: hubra sync {name}  (PR with the template's files)")
+        hints.append(f"{cmd} sync {name}  (PR with the template's files)")
     if any("plugin-signing" in p for p in problems):
-        say(f"   fix: hubra setup {name}  (plugin-signing environment)")
+        hints.append(f"hubra setup {name}  (plugin-signing environment)")
     if any("HUBRA_SIGNING_KEY" in p for p in problems):
-        say(f"   fix: hubra key <keyfile> {name}")
+        hints.append(f"hubra key <keyfile> {name}")
+    return hints
 
 
 # ── security alerts ──────────────────────────────────────────────────────────
@@ -1818,7 +1832,7 @@ HUBRA_VIEWS = {
 # ── main ─────────────────────────────────────────────────────────────────────
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     global DRY_RUN
     p = argparse.ArgumentParser(prog="hubra", description="GitHub and Hubra tools for the hubra-app repos",
                                 formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1877,7 +1891,7 @@ def main() -> None:
     sub.add_parser("logout", help="forget the saved Hubra API token")
     sp = sub.add_parser("tui", help="full-screen view of everything (needs: pip install textual)")
     sp.add_argument("--dry-run", action="store_true")
-    args = p.parse_args()
+    args = p.parse_args(argv)
     DRY_RUN = getattr(args, "dry_run", False)
 
     try:

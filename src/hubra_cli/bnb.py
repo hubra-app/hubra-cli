@@ -1,0 +1,194 @@
+"""hubra as a bitsandbricks (bnb) plugin.
+
+With bitsandbricks-cli installed next to hubra-cli (`pipx inject bitsandbricks-cli hubra-cli`),
+bnb gets the Hubra parts:
+
+  commands     bnb release | ship | bump | verify | key | setup | lists | hubra | login | logout
+               (the same as the hubra command; bnb does status, prs, merge, doctor, sync, ...)
+  status       plugin.yaml version and what is left to release
+  doctor       the plugin-signing environment, HUBRA_SIGNING_KEY, release.yml
+  TUI          Hubra tab (health, alerts, errors, jobs, token), Checks › Plugin lists and
+               Release zips, keys b bump · R release · S ship, the Hubra themes
+
+The class doesn't import bitsandbricks: bnb only needs these methods, so hubra-cli
+works (and tests) without bnb installed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+
+from hubra_cli import cli
+
+COMMANDS = {
+    "release": "tag plugins at the version in plugin.yaml (hubra release)",
+    "ship": "merge a plugin's ready PRs, then release it",
+    "bump": "PR with the next plugin version and changelog",
+    "verify": "check release zips against Hubra.pub",
+    "key": "store HUBRA_SIGNING_KEY in plugin-signing",
+    "setup": "create or set up a plugin repo from the template",
+    "lists": "plugin lists against the releases",
+    "hubra": "the running Hubra: health, alerts, errors, jobs, whoami, get",
+    "login": "save a Hubra API token",
+    "logout": "forget the saved Hubra API token",
+}
+SECTIONS = [  # Hubra tab: key, label, page in the manage app
+    ("health", "Health", "/app/platform/diagnostics"),
+    ("alerts", "Alerts", "/app/platform/alerts"),
+    ("errors", "Errors", "/app/platform/diagnostics/errors"),
+    ("jobs", "Jobs", "/app/platform/diagnostics/jobs"),
+    ("whoami", "Token", "/app/platform/api-tokens"),
+]
+
+
+def is_hubra_plugin(repo: str) -> bool:
+    return repo.startswith(f"{cli.ORG}/{cli.PREFIX}")
+
+
+def manifest_of(node: dict) -> tuple[str, str] | None:
+    return cli.parse_manifest((node.get("manifest") or {}).get("text"))
+
+
+def to_release(node: dict) -> str:
+    m = manifest_of(node)
+    if not m or m[0] == "example":
+        return ""
+    last = cli.newest([r["tagName"] for r in (node.get("releases") or {}).get("nodes") or []])
+    return f"v{m[1]}" if not last or cli.version_tuple(m[1]) > cli.version_tuple(last) else ""
+
+
+class HubraPlugin:
+    name = "hubra"
+    description = "Hubra plugin releases, signing, plugin lists and the Hubra API"
+    graphql_fields = 'manifest: object(expression: "HEAD:plugin.yaml") { ... on Blob { text } }'
+
+    # ── commands ──────────────────────────────────────────────────────────
+
+    def add_commands(self, sub) -> dict:
+        handlers = {}
+        for cmd, help_text in COMMANDS.items():
+            sp = sub.add_parser(cmd, help=f"{help_text} [hubra]", add_help=False)
+            sp.add_argument("rest", nargs=argparse.REMAINDER)
+            handlers[cmd] = self.runner(cmd)
+        return handlers
+
+    @staticmethod
+    def runner(cmd: str):
+        def run(args) -> None:
+            cli.main([cmd, *getattr(args, "_extra", []), *args.rest])
+        return run
+
+    # ── status and doctor ─────────────────────────────────────────────────
+
+    def status_columns(self) -> list:
+        def version(repo: str, node: dict) -> str:
+            m = manifest_of(node) if is_hubra_plugin(repo) else None
+            return ("template" if m[0] == "example" else m[1]) if m else ""
+        return [("plugin.yaml", version), ("to release", lambda repo, node: to_release(node))]
+
+    def repo_detail(self, repo: str, node: dict) -> list[str]:
+        m = manifest_of(node) if is_hubra_plugin(repo) else None
+        if not m:
+            return []
+        lines = [f"plugin.yaml  {m[0]} {m[1]}"]
+        todo = to_release(node)
+        if todo:
+            lines.append(f"to release   {todo}  (R releases it)")
+        return lines
+
+    def doctor(self, repo: str, group, ctx: dict) -> list[str]:
+        if not is_hubra_plugin(repo):
+            return []
+        return cli.signing_problems(repo, None)  # release.yml drift: bnb sync covers the template's files
+
+    def doctor_hints(self, repo: str, group, problems: list[str]) -> list[str]:
+        if not is_hubra_plugin(repo):
+            return []
+        return cli.signing_hints(cli.short(repo).removeprefix(cli.PREFIX), problems, cmd="bnb")
+
+    # ── TUI ───────────────────────────────────────────────────────────────
+
+    def tui_tabs(self) -> list[dict]:
+        def text(key: str) -> str:
+            return cli.capture(cli.HUBRA_VIEWS[key])
+        pages = {k: path for k, _, path in SECTIONS}
+        return [{"id": "hubra", "title": "Hubra", "rows": [(k, label) for k, label, _ in SECTIONS],
+                 "text": text, "url": lambda key: cli.MANAGE + pages[key]}]
+
+    def tui_checks(self) -> list:
+        def lists(repos: list[str]) -> str:
+            return cli.capture(cli.lists, False)
+
+        def verify(repos: list[str]) -> str:
+            return cli.capture(cli.for_each, [r for r in repos if is_hubra_plugin(r)], cli.verify, {})
+        return [("hubra-lists", "Plugin lists", lists), ("hubra-verify", "Release zips", verify)]
+
+    def tui_keys(self) -> list:
+        return [("b", "Bump", self.bump), ("R", "Release", self.release), ("S", "Ship", self.ship)]
+
+    def tui_commands(self) -> list:
+        return [("Bump plugin version", "b · PR with the next version and changelog", self.bump),
+                ("Release plugin", "R · push the tag for the version in plugin.yaml", self.release),
+                ("Ship plugin", "S · merge its ready PRs, then release", self.ship),
+                ("Hubra login", "save a Hubra API token for the Hubra tab", self.login)]
+
+    def tui_themes(self) -> list:
+        with contextlib.suppress(ImportError):
+            from hubra_cli.tui import THEMES
+            return list(THEMES)
+        return []
+
+    @staticmethod
+    def plugin_repo(app, verb: str) -> str | None:
+        repo = app.selected_repo()
+        if not repo or not is_hubra_plugin(repo):
+            app.log_line(f"{verb}: pick a Hubra plugin in the Repos tab first")
+            return None
+        return repo
+
+    def bump(self, app) -> None:
+        repo = self.plugin_repo(app, "b bumps a plugin's version")
+        if not repo:
+            return
+        name = cli.short(repo).removeprefix(cli.PREFIX)
+        options = [(f"{lvl}{'+auto' if auto else ''}", f"{lvl}{' and auto-merge the PR' if auto else ''}")
+                   for auto in (False, True) for lvl in ("patch", "minor", "major")]
+
+        def chosen(choice: str | None) -> None:
+            if choice:
+                level, _, auto = choice.partition("+")
+                app.log_line(f"bump {name} {level}{' (auto-merge)' if auto else ''} …")
+                app.do_job(self.with_dry_run(app, cli.for_each), [repo], cli.bump,
+                           {"level": level, "auto": bool(auto)}, False)
+        app.pick(f"Bump {name}: open a PR with the next version in plugin.yaml and a\n"
+                 "CHANGELOG section of the PRs merged since the last release.", options, chosen)
+
+    def release(self, app) -> None:
+        repo = self.plugin_repo(app, "R releases a plugin")
+        if repo:
+            app.confirm_then(f"Release {cli.short(repo)} at the version in plugin.yaml?\n"
+                             "(pushes the tag v<version> if it is new; the workflow builds the release)",
+                             self.with_dry_run(app, cli.release), repo, {})
+
+    def ship(self, app) -> None:
+        repo = self.plugin_repo(app, "S ships a plugin")
+        if repo:
+            app.confirm_then(f"Ship {cli.short(repo)}: merge its ready PRs, then release the version in\n"
+                             "plugin.yaml (pushes the tag; the workflow builds the release)?",
+                             self.with_dry_run(app, cli.for_each), [repo], cli.ship,
+                             {"pick": {}, "now": True, "ready": False}, False)
+
+    def login(self, app) -> None:
+        def got(token: str | None) -> None:
+            if token:
+                app.do_job(lambda t: print(cli.save_token(t)), token)
+        app.ask("Hubra API token (hbr_…), kept in ~/.config/hubra/token", got, password=True)
+
+    @staticmethod
+    def with_dry_run(app, fn):
+        """hubra-cli keeps its own DRY_RUN; follow the TUI's."""
+        def run(*args):
+            cli.DRY_RUN = bool(getattr(app, "dry_run", False))
+            return fn(*args)
+        return run

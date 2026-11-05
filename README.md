@@ -125,6 +125,18 @@ pane and the log are short labels you can click. Every change asks first;
 
 ![Repo settings drift in the Checks tab](docs/screenshots/checks-doctor.png)
 
+## As a bnb plugin
+
+[bitsandbricks](https://github.com/bitsandbricks-ch/bitsandbricks-cli) (`bnb`) is the general version of this tool: any org, defaults kept in a repo you pick, doctor and sync across all of them. hubra-cli plugs into it:
+
+```sh
+pipx install "git+https://github.com/bitsandbricks-ch/bitsandbricks-cli#egg=bitsandbricks-cli[tui]"
+pipx inject bitsandbricks-cli "git+https://github.com/hubra-app/hubra-cli"
+bnb init bitsandbricks-ch/bitsandbricks-defaults
+```
+
+bnb then has `release`, `ship`, `bump`, `verify`, `key`, `setup`, `lists`, `hubra`, `login` and `logout` from here, plugin.yaml columns in `bnb status`, the plugin-signing checks in `bnb doctor`, and in `bnb tui` the Hubra tab, Checks › Plugin lists and Release zips, keys b, R and S, and the Hubra themes (t). The `hubra` command keeps working on its own.
+
 ## Development
 
 ```sh
