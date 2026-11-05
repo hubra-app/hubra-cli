@@ -14,8 +14,9 @@ owner of hubra-app (`gh auth login`; if asked: `gh auth refresh -s
 admin:org,workflow`).
 
 ```sh
-pipx install "git+https://github.com/hubra-app/hubra-cli#egg=hubra-cli[tui]"
+pipx install "hubra-cli[tui] @ git+https://github.com/hubra-app/hubra-cli"
 pipx upgrade hubra-cli                 # later, for a new version
+# without the TUI: pipx install git+https://github.com/hubra-app/hubra-cli
 ```
 
 Without the `[tui]` extra everything except `hubra tui` works, using only
@@ -29,15 +30,15 @@ hubra prs                     # every open PR with checks, review, link
 hubra pr budgets#12 --diff    # one PR in depth (--web opens it)
 hubra merge                   # auto-merge ready plugin PRs
 hubra merge budgets#12        # only this PR (--now merges at once, --ready un-drafts)
-hubra release                 # release new plugin.yaml versions, with run links
+hubra release                 # tag new plugin.yaml versions; the workflow signs and releases
 hubra ship                    # merge, then release
 hubra approve                 # approve signing runs waiting for you
 hubra runs --failed           # recent failed Actions runs
 hubra open budgets#12         # open a repo / PR / --actions / --releases page
 hubra bump budgets minor      # PR with plugin.yaml + CHANGELOG for the next version
 hubra lists                   # plugin lists vs releases (--fix opens PRs)
-hubra doctor                  # repo settings that drifted from what setup sets
-hubra setup                   # create new plugin repos, configure all
+hubra doctor                  # plugin repos that drifted from the template
+hubra setup                   # create new plugin repos, copy the template's setup
 hubra key signing.key         # store the plugin signing key
 hubra login                   # save a Hubra API token
 hubra hubra health            # also: alerts, errors, jobs, whoami, get PATH
@@ -50,9 +51,22 @@ and `hubra <command> --help` explain every option. `--dry-run` shows what
 would change without changing anything.
 
 A plugin release goes: `hubra bump budgets` (PR with the new version and
-changelog) → merge → `hubra release budgets` → `hubra approve` (signing) →
+changelog) → merge → `hubra release budgets` (pushes the tag v<version>) →
+`hubra approve` (signing; release.yml then creates the release with the zip,
+so releases can be immutable) →
 `hubra lists --fix` (version bumps in the READMEs; new rows, hubra.club cards
 and the org profile stay yours, see hubra docs/plugin-releases.md).
+
+## The template is the reference
+
+`hubra-plugins-template` as it is on GitHub now is what every plugin repo
+should look like. `hubra doctor` compares each plugin with it: repo settings
+(merge buttons, auto-merge, wiki, …), security features, release immutability,
+private vulnerability reporting, every ruleset rule by rule (conditions,
+parameters, bypass) and release.yml. Change something in the template and every
+plugin shows it as drift; `hubra setup <name>` copies it over. doctor also
+checks the template itself: its live rulesets against its `.github/rulesets`
+files, and auto-merge, branch deletion, wiki and projects.
 
 ## Hubra API
 
@@ -65,10 +79,15 @@ point at another install.
 
 ## TUI keys
 
-Tabs: Repos, Pull requests, Runs, Checks (plugin lists and doctor) and Hubra.
-`r` refresh · `o` open in browser · `m` auto-merge · `M` merge now · `y` mark
-ready · `d` diff · `R` release · `a` approve signing · `q` quit. Every change
-asks first; `hubra tui --dry-run` only shows what it would do.
+Tabs: Repos, Pull requests, Runs, Checks (plugin lists and doctor) and Hubra,
+in the Hubra colours (`t` switches to the light theme).
+`1`-`5` switch tabs and the arrow keys move right away · `Enter` or `o` open in
+the browser · `r` refresh · `m` auto-merge · `M` merge now · `y` mark ready ·
+`d` diff · `R` release · `a` approve signing · `q` quit. Links in the detail
+pane and the log are short labels you can click. Every change asks first;
+`hubra tui --dry-run` only shows what it would do.
+
+![Repo settings drift in the Checks tab](docs/screenshots/checks-doctor.png)
 
 ## Development
 

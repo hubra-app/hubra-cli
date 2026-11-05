@@ -1,6 +1,7 @@
 """hubra tui: one full-screen view of the hubra-app repos and the running Hubra.
 
-Start it with `hubra tui` (needs the tui extra: `pipx install 'hubra-cli[tui]'`). Tabs:
+Start it with `hubra tui`; it needs the [tui] extra (README › Install) or
+`pipx inject hubra-cli textual`. Tabs:
 
   Repos          version on main, latest release, what's left to release, PRs, CI
   Pull requests  every open PR; the right side shows the selected one in depth
@@ -9,23 +10,30 @@ Start it with `hubra tui` (needs the tui extra: `pipx install 'hubra-cli[tui]'`)
   Hubra          health, alerts, errors, jobs and token of the running Hubra
                  (needs a token: `hubra login` or HUBRA_TOKEN)
 
-Keys: r refresh · o open in browser · m auto-merge · M merge now · y mark ready
-· d diff · R release · a approve signing · q quit. Every action that changes
-something asks first; with --dry-run it only shows what it would do.
+Keys: 1-5 switch tabs · arrows move · Enter or o open in browser · r refresh
+· m auto-merge · M merge now · y mark ready · d diff · R release · a approve
+signing · t light/dark · q quit. Links in the detail pane and the log open on
+click. Every action that changes something asks first; with --dry-run it only
+shows what it would do.
 """
 
 from __future__ import annotations
 
 import contextlib
+import re
+import time
 import webbrowser
 from typing import ClassVar
 
+from rich.style import Style
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
+from textual.theme import Theme
 from textual.widgets import (
     Button,
     DataTable,
@@ -51,11 +59,34 @@ HUBRA_SECTIONS = [
     ("whoami", "Token", "/app/platform/api-tokens"),
 ]
 
+# Hubra brand: violet scale, Signal Gold, the app's dark and light neutrals.
+VIOLET = {4: "#9f7cf8", 5: "#8758f0", 6: "#7441e0", 7: "#6131c4"}
+GOLD = "#fece2b"
+SUCCESS, WARNING, DANGER = "#1f9d57", "#e8a317", "#c73550"
+
+THEMES = [
+    Theme(name="hubra", dark=True, primary=VIOLET[4], secondary=VIOLET[5], accent=GOLD,
+          foreground="#ededef", background="#111113", surface="#19191c", panel="#222226",
+          success=SUCCESS, warning=WARNING, error=DANGER,
+          variables={"footer-key-foreground": GOLD, "block-cursor-background": VIOLET[6],
+                     "block-cursor-foreground": "#ffffff", "input-selection-background": f"{VIOLET[6]} 40%",
+                     "link-color": VIOLET[4], "border": "#2f2f34"}),
+    # Gold only ever sits on ink, so the light theme highlights in deep violet.
+    Theme(name="hubra-light", dark=False, primary=VIOLET[6], secondary=VIOLET[7], accent=VIOLET[7],
+          foreground="#1a1625", background="#f7f6fb", surface="#ffffff", panel="#ebe3ff",
+          success="#18794e", warning=WARNING, error=DANGER,
+          variables={"footer-key-foreground": VIOLET[7], "block-cursor-background": VIOLET[6],
+                     "block-cursor-foreground": "#ffffff", "link-color": VIOLET[6], "border": "#e6e3ef"}),
+]
+
 STATE_STYLE = {
-    "success": "green", "passing": "green", "ok": "green",
-    "failure": "red", "failing": "red", "error": "red", "conflicts": "red",
-    "pending": "yellow", "running": "yellow", "waiting": "yellow", "in_progress": "yellow",
+    "success": SUCCESS, "passing": SUCCESS, "ok": SUCCESS, "ready": SUCCESS,
+    "failure": DANGER, "failing": DANGER, "error": DANGER, "conflicts": DANGER,
+    "pending": WARNING, "running": WARNING, "waiting": WARNING, "in_progress": WARNING, "auto-merge": VIOLET[4],
 }
+
+URL = re.compile(r"https?://[^\s)\]>,'\"]+")
+SHORTEN = (("https://github.com/hubra-app/", ""), ("https://github.com/", ""), ("https://", ""))
 
 
 def styled(value: str) -> Text:
@@ -65,10 +96,35 @@ def styled(value: str) -> Text:
     return Text(value)
 
 
+def link_label(url: str) -> str:
+    """github.com/hubra-app/hubra-plugin-budgets/pull/12 -> hubra-plugin-budgets/pull/12."""
+    for prefix, repl in SHORTEN:
+        if url.startswith(prefix):
+            return repl + url[len(prefix):]
+    return url
+
+
+def linkify(text: str, color: str = VIOLET[4]) -> Text:
+    """Text with every URL as a short, clickable label (opens in the browser on click).
+
+    The label is one unbroken word, so a long URL never ends up split over
+    two lines, and clicking any part of it opens the full URL."""
+    out = Text()
+    pos = 0
+    for m in URL.finditer(text):
+        out.append(text[pos:m.start()])
+        url = m.group(0).rstrip(".")
+        out.append(link_label(url), style=Style(color=color, underline=True,
+                                                meta={"@click": f"app.open_link({url!r})"}))
+        pos = m.start() + len(url)
+    out.append(text[pos:])
+    return out
+
+
 class Confirm(ModalScreen[bool]):
     DEFAULT_CSS = """
     Confirm { align: center middle; }
-    Confirm > Vertical { width: 80; height: auto; border: thick $warning; background: $surface; padding: 1 2; }
+    Confirm > Vertical { width: 80; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
     Confirm Horizontal { height: auto; margin-top: 1; }
     Confirm Button { margin-right: 2; }
     """
@@ -95,18 +151,35 @@ class Confirm(ModalScreen[bool]):
 class HubraTui(App):
     TITLE = "Hubra"
     CSS = """
+    Screen { background: $background; }
+    Header { background: $panel; color: $foreground; }
     #tabs { height: 1fr; }
     #tabs ContentSwitcher { height: 1fr; }
+    Tabs .underline--bar { color: $accent; background: $panel; }
+    Tab.-active { color: $accent; text-style: bold; }
     TabPane { height: 1fr; padding: 0; }
     .split { height: 1fr; }
-    .split DataTable { width: 3fr; height: 1fr; }
-    .split VerticalScroll { width: 2fr; height: 1fr; border-left: solid $primary; padding: 0 1; }
+    .split DataTable { width: 3fr; height: 1fr; background: $surface; }
+    .split DataTable:focus { border-left: tall $accent; }
+    DataTable > .datatable--header { background: $panel; color: $primary; text-style: bold; }
+    .detail { width: 2fr; height: 1fr; border-left: solid $primary; padding: 0 1;
+              overflow-x: auto; overflow-y: auto; background: $background; }
+    .detail Static { width: auto; }
     #hubra-table, #checks-table { width: 22; }
-    #log { height: 7; border-top: solid $primary; }
+    #log { height: 8; border-top: solid $primary; background: $surface; padding: 0 1;
+           scrollbar-size-horizontal: 1; }
+    * { scrollbar-background: $surface; scrollbar-background-hover: $surface;
+        scrollbar-color: $primary 40%; scrollbar-color-hover: $primary 70%; scrollbar-color-active: $primary; }
     """
     BINDINGS: ClassVar = [
+        Binding("1", "tab('repos')", "Repos", show=False),
+        Binding("2", "tab('prs')", "PRs", show=False),
+        Binding("3", "tab('runs')", "Runs", show=False),
+        Binding("4", "tab('checks')", "Checks", show=False),
+        Binding("5", "tab('hubra')", "Hubra", show=False),
         Binding("r", "refresh", "Refresh"),
         Binding("o", "open", "Open"),
+        Binding("t", "toggle_theme", "Light/dark", show=False),
         Binding("m", "merge(False)", "Auto-merge"),
         Binding("M", "merge(True)", "Merge now"),
         Binding("y", "ready", "Ready"),
@@ -137,12 +210,16 @@ class HubraTui(App):
                                   ("runs", "Runs"), ("checks", "Checks"), ("hubra", "Hubra")):
                 with TabPane(title, id=tab_id), Horizontal(classes="split"):
                     yield DataTable(id=f"{tab_id}-table", cursor_type="row", zebra_stripes=True)
-                    with VerticalScroll():
+                    with VerticalScroll(classes="detail", can_focus=False):
                         yield Static(id=f"{tab_id}-detail", markup=False)
-        yield RichLog(id="log", wrap=True, markup=False)
+        yield RichLog(id="log", wrap=False, markup=False, min_width=40)
         yield Footer()
 
     def on_mount(self) -> None:
+        for theme in THEMES:
+            self.register_theme(theme)
+        self.theme = "hubra"
+        self.query_one("#log", RichLog).can_focus = False
         heads = {
             "repos": g.STATUS_HEAD,
             "prs": ["repo", "#", "title", "state", "checks"],
@@ -158,13 +235,36 @@ class HubraTui(App):
         checks = self.query_one("#checks-table", DataTable)
         for key, label in CHECKS:
             checks.add_row(label, key=key)
-        self.log_line("Loading … (r refreshes, q quits)")
+        self.log_line("Loading … 1-5 switch tabs, arrows move, Enter opens, r refreshes, q quits")
+        self.focus_table()
         self.load_github()
         self.load_runs()
         self.set_interval(120, self.action_refresh)
 
     def log_line(self, text: str) -> None:
-        self.query_one("#log", RichLog).write(Text(text))
+        line = Text(time.strftime("%H:%M:%S "), style="dim")
+        line.append_text(linkify(text.strip()))
+        self.query_one("#log", RichLog).write(line)
+
+    def focus_table(self, tab_id: str | None = None) -> None:
+        with contextlib.suppress(Exception):
+            self.query_one(f"#{tab_id or self.tab()}-table", DataTable).focus()
+
+    def action_tab(self, tab_id: str) -> None:
+        self.query_one("#tabs", TabbedContent).active = tab_id
+        self.focus_table(tab_id)
+
+    def highlight(self) -> str:
+        """Signal Gold on the dark theme; deep violet on the light one (gold needs ink behind it)."""
+        return VIOLET[7] if self.theme == "hubra-light" else GOLD
+
+    def action_toggle_theme(self) -> None:
+        self.theme = "hubra-light" if self.theme == "hubra" else "hubra"
+        self.action_refresh()
+
+    def action_open_link(self, url: str) -> None:
+        self.log_line(f"open {url}")
+        webbrowser.open(url)
 
     def tab(self) -> str:
         return self.query_one("#tabs", TabbedContent).active
@@ -179,7 +279,7 @@ class HubraTui(App):
             return None
 
     def show(self, tab_id: str, text: str) -> None:
-        self.query_one(f"#{tab_id}-detail", Static).update(Text(text))
+        self.query_one(f"#{tab_id}-detail", Static).update(linkify(text))
 
     # ── loading ───────────────────────────────────────────────────────────
 
@@ -201,13 +301,17 @@ class HubraTui(App):
         self.call_from_thread(self.fill_github, rows, prs, info)
 
     def fill_github(self, rows: list[list[str]], prs: dict[str, dict], info: dict) -> None:
+        with contextlib.suppress(NoMatches):  # the app is closing
+            self._fill_github(rows, prs, info)
+
+    def _fill_github(self, rows: list[list[str]], prs: dict[str, dict], info: dict) -> None:
         self.prs, self.info, self.detail_cache = prs, info, {}
         table = self.query_one("#repos-table", DataTable)
         keep = self.current_key("repos")
         table.clear()
         for repo, row in zip(self.repos, rows):
             cells = [Text(c) for c in row]
-            cells[3] = Text(row[3], style="bold yellow") if row[3] else Text("")
+            cells[3] = Text(row[3], style=f"bold {self.highlight()}") if row[3] else Text("")
             cells[5] = styled(row[5])
             table.add_row(*cells, key=repo)
         self.restore(table, keep)
@@ -253,6 +357,10 @@ class HubraTui(App):
         self.call_from_thread(self.fill_runs, waiting, last)
 
     def fill_runs(self, waiting, last) -> None:
+        with contextlib.suppress(NoMatches):  # the app is closing
+            self._fill_runs(waiting, last)
+
+    def _fill_runs(self, waiting, last) -> None:
         table = self.query_one("#runs-table", DataTable)
         keep = self.current_key("runs")
         table.clear()
@@ -262,7 +370,8 @@ class HubraTui(App):
             key = f"{repo}|{run['id']}"
             seen.add(run["id"])
             self.runs[key] = (repo, run, envs)
-            table.add_row(g.short(repo).removeprefix(g.PREFIX), Text("waiting for you", style="bold yellow"),
+            waiting_text = Text("waiting for you", style=f"bold {self.highlight()}")
+            table.add_row(g.short(repo).removeprefix(g.PREFIX), waiting_text,
                           run.get("name") or "", run.get("head_branch") or "", g.ago(run.get("created_at")), key=key)
         for repo, run in last:
             if not run or run["id"] in seen:
@@ -291,7 +400,11 @@ class HubraTui(App):
         self.update_detail()
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        self.focus_table()
         self.update_detail()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        self.action_open()
 
     def update_detail(self) -> None:
         tab, key = self.tab(), self.current_key()
@@ -388,8 +501,7 @@ class HubraTui(App):
             url = docs if key == "lists" else f"{g.WEB}/{g.TEMPLATE}"
         else:
             url = g.MANAGE + {k: path for k, _, path in HUBRA_SECTIONS}[key]
-        self.log_line(f"open {url}")
-        webbrowser.open(url)
+        self.action_open_link(url)
 
     def confirm_then(self, question: str, job, *args) -> None:
         if self.dry_run:
@@ -453,7 +565,8 @@ class HubraTui(App):
         if not g.is_plugin(key):
             self.log_line("Core releases follow docs/release-guidelines.md")
             return
-        self.confirm_then(f"Release {g.short(key)} at the version in plugin.yaml (if it is new)?",
+        self.confirm_then(f"Release {g.short(key)} at the version in plugin.yaml?\n"
+                          "(pushes the tag v<version> if it is new; the workflow builds the release)",
                           g.release, key, {})
 
     def action_approve(self) -> None:

@@ -46,9 +46,11 @@ merge    Turns on auto-merge (squash) for every open PR that isn't a draft:
          instead of waiting (GitHub refuses while required checks are red).
          Prints each PR's link and its checks page.
 release  Reads plugin.yaml on the default branch. If v<version> has no
-         release and is newer than the latest, creates it; the release
-         workflow then tests, signs (waits for your approval) and attaches
-         the zip. Prints the release link and the release workflow run.
+         release and is newer than the latest, pushes the tag v<version>;
+         release.yml then tests, signs (waits for your approval) and creates
+         the release with the zip attached, so immutable releases work.
+         Repos still on the older "release published" workflow get the
+         release created instead. Prints the release page and the run.
          Repos still on the template's example plugin are skipped.
 ship     merge, then release. Auto-merge is asynchronous, so a version bump
          that is still in a PR is released on the next run.
@@ -65,15 +67,17 @@ lists    Compares the latest release of each plugin with the hubra README,
          the Marketplace README, the org profile and the hubra.club Modules
          cards. --fix opens PRs for outdated versions in the two READMEs
          (new rows, cards and the org profile stay yours).
-doctor   Checks each repo against what setup sets (settings, security,
-         rulesets, plugin-signing environment and its key, release.yml as in
-         the template) and names the command that fixes it.
+doctor   Compares each plugin repo with hubra-plugins-template as it is on
+         GitHub now: repo settings, security features, release immutability,
+         every ruleset rule by rule (conditions, parameters, bypass), and
+         release.yml. A change in the template shows up as drift in every
+         plugin. Also checks the plugin-signing environment and its key, and
+         the template's live rulesets against its .github/rulesets files.
 setup    Creates the plugins in NEW_PLUGINS that don't exist yet from
-         hubra-plugins-template, then configures every named plugin repo:
-         no wiki/projects, delete merged branches, auto-merge allowed,
-         secret scanning + push protection, private vulnerability reporting,
-         rulesets main + tags from the template (replaced by name), and the
-         plugin-signing environment (you as reviewer, only v* tags).
+         hubra-plugins-template, then copies the template's settings,
+         security features, release immutability and rulesets (replaced by
+         name) to every named plugin repo, and sets the plugin-signing
+         environment (you as reviewer, only v* tags).
 key      Stores the private key of Hubra.pub as HUBRA_SIGNING_KEY in each
          repo's plugin-signing environment, piped to `gh secret set` (gh
          encrypts it before it leaves your machine). Refuses the Marketplace
@@ -388,28 +392,30 @@ def setup(repo: str, ctx: dict) -> None:
             time.sleep(5)  # GitHub copies the template in the background
         say("   created from the template")
 
+    tpl = ctx["template"]
     api("PATCH", f"/repos/{repo}", {
-        "delete_branch_on_merge": True,
-        "allow_auto_merge": True,
-        "has_wiki": False,
-        "has_projects": False,
-        "security_and_analysis": {
-            "secret_scanning": {"status": "enabled"},
-            "secret_scanning_push_protection": {"status": "enabled"},
-        },
+        **{k: tpl["settings"][k] for k in REPO_SETTINGS if k in tpl["settings"]},
+        "security_and_analysis": {k: {"status": v} for k, v in tpl["security"].items() if k in PATCHABLE_SECURITY},
     })
-    api("PUT", f"/repos/{repo}/private-vulnerability-reporting")
+    if "dependabot_security_updates" in tpl["security"]:
+        on = tpl["security"]["dependabot_security_updates"] == "enabled"
+        api("PUT" if on else "DELETE", f"/repos/{repo}/automated-security-fixes")
+    api("PUT" if tpl["vulnerability_reporting"] else "DELETE", f"/repos/{repo}/private-vulnerability-reporting")
+    if tpl["immutable_releases"] is not None:
+        api("PUT" if tpl["immutable_releases"] else "DELETE", f"/repos/{repo}/immutable-releases")
 
     try:
         current = {r["name"]: r["id"] for r in api("GET", f"/repos/{repo}/rulesets") or []}
     except RuntimeError:
         current = {}  # dry run of a repo that doesn't exist yet
-    for ruleset in ctx["rulesets"]:
+    for ruleset in tpl["rulesets"].values():
+        body = {k: ruleset[k] for k in RULESET_FIELDS if k in ruleset}
         if ruleset["name"] in current:
-            api("PUT", f"/repos/{repo}/rulesets/{current[ruleset['name']]}", ruleset)
+            api("PUT", f"/repos/{repo}/rulesets/{current[ruleset['name']]}", body)
         else:
-            api("POST", f"/repos/{repo}/rulesets", ruleset)
-    say("   settings, security and rulesets main + tags set")
+            api("POST", f"/repos/{repo}/rulesets", body)
+    say(f"   settings, security, release immutability and rulesets ({', '.join(tpl['rulesets'])}) "
+        "copied from the template")
 
     api("PUT", f"/repos/{repo}/environments/plugin-signing", {
         "reviewers": [{"type": "User", "id": ctx["me"]["id"]}],
@@ -490,12 +496,13 @@ def merge(repo: str, ctx: dict) -> None:
 
 
 def release_run(repo: str, tag: str, wait: int = 0) -> dict | None:
-    """The release workflow run for `tag`; waits up to `wait` seconds for it to start."""
+    """The release workflow run for `tag` (tag push or, before immutable releases, release
+    published); waits up to `wait` seconds for it to start."""
     deadline = time.time() + wait
     while True:
-        runs = api("GET", f"/repos/{repo}/actions/runs?event=release&per_page=10") or {}
+        runs = api("GET", f"/repos/{repo}/actions/runs?branch={tag}&per_page=10") or {}
         for run in runs.get("workflow_runs") or []:
-            if run.get("head_branch") == tag:
+            if run.get("head_branch") == tag and run.get("event") in ("push", "release"):
                 return run
         if time.time() >= deadline:
             return None
@@ -506,6 +513,26 @@ def run_state(run: dict) -> str:
     if run.get("status") == "waiting":
         return "waiting for your approval (plugin-signing)"
     return run.get("conclusion") or run.get("status") or "?"
+
+
+def tag_exists(repo: str, tag: str) -> bool:
+    try:
+        api("GET", f"/repos/{repo}/git/ref/tags/{tag}")
+        return True
+    except RuntimeError as err:
+        if "404" in str(err) or "Not Found" in str(err):
+            return False
+        raise
+
+
+def releases_on_tag_push(repo: str, branch: str) -> bool:
+    """True when release.yml starts on a v* tag push and creates the release itself (the
+    flow for immutable releases); False for the older "release published" flow."""
+    found = get_file(repo, ".github/workflows/release.yml", branch)
+    if not found:
+        return True
+    on = found[0].split("\njobs:", 1)[0]
+    return "release:" not in on and "tags:" in on
 
 
 def release(repo: str, ctx: dict) -> None:
@@ -524,25 +551,50 @@ def release(repo: str, ctx: dict) -> None:
     tag, tags = f"v{ver}", release_tags(repo)
     last = newest(tags)
     page = f"{WEB}/{repo}/releases/tag/{tag}"
+    name = short(repo).removeprefix(PREFIX)
     if tag in tags:
         run = release_run(repo, tag)
         say(f"   {tag} already released\n      {page}")
         if run:
             say(f"      release run: {run_state(run)}\n      {run['html_url']}")
-    elif last and version_tuple(ver) <= version_tuple(last):
+        assets = (api("GET", f"/repos/{repo}/releases/tags/{tag}") or {}).get("assets") or []
+        if not any(a.get("name", "").endswith(".zip") for a in assets):
+            say("      NO SIGNED ZIP: the Marketplace can't install this release. Once releases are"
+                f" immutable it can't be fixed in place; release a new version: hubra bump {name} patch")
+        return
+    if last and version_tuple(ver) <= version_tuple(last):
         say(f"   plugin.yaml says {ver}, not newer than {last}: skipped")
-    elif DRY_RUN:
-        say(f"   [dry-run] release {tag} on {branch} (latest {last or 'none'})\n      would be {page}")
+        return
+    on_tag = releases_on_tag_push(repo, branch)
+    if on_tag and tag_exists(repo, tag):
+        # Tag pushed, release not there yet: the workflow is running, waits for you or failed.
+        run = release_run(repo, tag)
+        say(f"   {tag} is tagged, the workflow creates the release once it is signed")
+        if run:
+            say(f"      release run: {run_state(run)}\n      {run['html_url']}")
+            if run.get("conclusion") == "failure":
+                say("      it failed: fix it, then delete the tag and run release again")
+        return
+    how = "push tag" if on_tag else "publish release"
+    if DRY_RUN:
+        say(f"   [dry-run] {how} {tag} on {branch} (latest {last or 'none'})\n      would be {page}")
+        return
+    if on_tag:
+        # Immutable releases: the workflow tests, signs and then creates the release with the
+        # zip attached, so only the tag is made here (a tag pushed with your token starts it).
+        head = api("GET", f"/repos/{repo}/git/ref/heads/{branch}")["object"]["sha"]
+        api("POST", f"/repos/{repo}/git/refs", {"ref": f"refs/tags/{tag}", "sha": head})
+        say(f"   tagged {tag} on {branch} at {head[:7]} (was {last or 'none'}); the release appears at\n      {page}")
     else:
         gh("release", "create", tag, "--repo", repo, "--target", branch,
            "--title", f"{pid} {ver}", "--notes", f"{pid} {ver}")
         say(f"   released {tag} (was {last or 'none'})\n      {page}")
-        run = release_run(repo, tag, wait=20)
-        if run:
-            say(f"      release run: {run_state(run)}\n      {run['html_url']}")
-        else:
-            say(f"      release run not started yet: {WEB}/{repo}/actions?query=event%3Arelease")
-        say(f"      approve the signing step there or with: hubra approve {short(repo).removeprefix(PREFIX)}")
+    run = release_run(repo, tag, wait=20)
+    if run:
+        say(f"      release run: {run_state(run)}\n      {run['html_url']}")
+    else:
+        say(f"      release run not started yet: {WEB}/{repo}/actions/workflows/release.yml")
+    say(f"      approve the signing step there or with: hubra approve {name}")
 
 
 def ship(repo: str, ctx: dict) -> None:
@@ -985,46 +1037,182 @@ def lists(fix: bool) -> None:
         say(f"  {short(repo)}: {url}")
 
 
-def doctor_ctx() -> dict:
+# The template repo is the reference for every plugin repo: what it has on
+# GitHub now is what `setup` copies and what `doctor` compares against.
+REPO_SETTINGS = ("allow_auto_merge", "allow_merge_commit", "allow_rebase_merge", "allow_squash_merge",
+                 "allow_update_branch", "delete_branch_on_merge", "has_discussions", "has_issues",
+                 "has_projects", "has_wiki", "merge_commit_message", "merge_commit_title",
+                 "squash_merge_commit_message", "squash_merge_commit_title", "web_commit_signoff_required")
+PATCHABLE_SECURITY = ("secret_scanning", "secret_scanning_push_protection",
+                      "secret_scanning_non_provider_patterns", "secret_scanning_validity_checks")
+# What the template itself should have; `hubra merge` needs auto-merge.
+PLUGIN_SETTINGS = {"allow_auto_merge": True, "delete_branch_on_merge": True, "has_wiki": False, "has_projects": False}
+RULESET_FIELDS = ("name", "target", "enforcement", "conditions", "rules", "bypass_actors")
+
+
+def immutable_releases(repo: str) -> bool | None:
+    try:
+        return bool((api("GET", f"/repos/{repo}/immutable-releases") or {}).get("enabled"))
+    except RuntimeError as err:
+        return False if "404" in str(err) else None  # 404: off; anything else: unknown
+
+
+def vulnerability_reporting(repo: str) -> bool | None:
+    try:
+        return bool((api("GET", f"/repos/{repo}/private-vulnerability-reporting") or {}).get("enabled"))
+    except RuntimeError:
+        return None
+
+
+def live_rulesets(repo: str) -> dict[str, dict]:
+    """Every ruleset of the repo in full, by name."""
+    listed = api("GET", f"/repos/{repo}/rulesets") or []
+    return {r["name"]: api("GET", f"/repos/{repo}/rulesets/{r['id']}") or {} for r in listed}
+
+
+def repo_state(repo: str) -> dict:
+    info = api("GET", f"/repos/{repo}") or {}
+    return {
+        "settings": {k: info.get(k) for k in REPO_SETTINGS if k in info},
+        "security": {k: (v or {}).get("status") for k, v in (info.get("security_and_analysis") or {}).items()},
+        "vulnerability_reporting": vulnerability_reporting(repo),
+        "immutable_releases": immutable_releases(repo),
+        "rulesets": live_rulesets(repo),
+    }
+
+
+def template_baseline() -> dict:
+    tpl = repo_state(TEMPLATE)
     workflow = get_file(TEMPLATE, ".github/workflows/release.yml")
-    return {"rulesets": [json.loads(file_on(TEMPLATE, f".github/rulesets/{f}.json")) for f in ("main", "tags")],
-            "workflow": workflow[1] if workflow else None}
+    tpl["workflow"] = workflow[1] if workflow else None
+    return tpl
+
+
+def compact(value) -> str:
+    if value is None:
+        return "unset"
+    text = value if isinstance(value, str) else json.dumps(value, separators=(",", ":"))
+    return text if len(text) <= 60 else text[:57] + "..."
+
+
+def covers(have, want) -> bool:
+    """True when `have` has every key and value of `want` (the files leave out GitHub's defaults)."""
+    if isinstance(want, dict) and isinstance(have, dict):
+        return all(k in have and covers(have[k], v) for k, v in want.items())
+    return have == want
+
+
+def bypass(rs: dict) -> list:
+    return sorted((a.get("actor_type"), a.get("actor_id"), a.get("bypass_mode")) for a in rs.get("bypass_actors") or [])
+
+
+def ruleset_drift(have: dict, want: dict, against: str = "template", subset: bool = False) -> list[str]:
+    """What differs between two rulesets, one line each."""
+    same = covers if subset else (lambda a, b: a == b)
+    out = []
+    for key in ("target", "enforcement"):
+        if key in want and have.get(key) != want[key]:
+            out.append(f"{key} is {have.get(key)}, {against} has {want[key]}")
+    if not same(have.get("conditions") or {}, want.get("conditions") or {}):
+        out.append(f"conditions {compact(have.get('conditions'))}, {against} has {compact(want.get('conditions'))}")
+    hr = {r["type"]: r.get("parameters") or {} for r in have.get("rules") or []}
+    wr = {r["type"]: r.get("parameters") or {} for r in want.get("rules") or []}
+    if set(wr) - set(hr):
+        out.append(f"lacks {', '.join(sorted(set(wr) - set(hr)))}")
+    if set(hr) - set(wr):
+        out.append(f"has {', '.join(sorted(set(hr) - set(wr)))}, {against} doesn't")
+    for t in sorted(set(hr) & set(wr)):
+        for k in sorted(set(wr[t]) | (set() if subset else set(hr[t]))):
+            if not same(hr[t].get(k), wr[t].get(k)):
+                out.append(f"{t}.{k} is {compact(hr[t].get(k))}, {against} has {compact(wr[t].get(k))}")
+    if "bypass_actors" in want and bypass(have) != bypass(want):
+        def who(rs):
+            return ", ".join(f"{t} {i} ({m})" for t, i, m in bypass(rs)) or "nobody"
+        out.append(f"bypass is {who(have)}, {against} has {who(want)}")
+    return out
+
+
+def state_drift(have: dict, tpl: dict) -> list[str]:
+    """Settings, security, release immutability and rulesets that differ from the template."""
+    problems = []
+    for key, want in tpl["settings"].items():
+        if have["settings"].get(key) != want:
+            problems.append(f"{key} is {compact(have['settings'].get(key))}, template has {compact(want)}")
+    for key, want in tpl["security"].items():
+        if have["security"].get(key) != want:
+            problems.append(f"{key} is {have['security'].get(key) or 'off'}, template has {want}")
+    for key, label in (("vulnerability_reporting", "private vulnerability reporting"),
+                       ("immutable_releases", "release immutability")):
+        if have[key] is None or tpl[key] is None:
+            if have[key] is None:
+                problems.append(f"{label}: couldn't read it")
+        elif have[key] != tpl[key]:
+            problems.append(f"{label} is {'on' if have[key] else 'off'}, template has {'on' if tpl[key] else 'off'}")
+    for name, want in tpl["rulesets"].items():
+        if name not in have["rulesets"]:
+            problems.append(f"ruleset {name} is missing")
+        else:
+            problems += [f"ruleset {name}: {d}" for d in ruleset_drift(have["rulesets"][name], want)]
+    for name in sorted(set(have["rulesets"]) - set(tpl["rulesets"])):
+        problems.append(f"ruleset {name} isn't in the template")
+    return problems
+
+
+def doctor_ctx() -> dict:
+    return {"template": template_baseline()}
 
 
 def doctor_all(repos: list[str]) -> None:
-    for_each(repos, doctor, doctor_ctx())
+    ctx = doctor_ctx()
+    say(f"== {TEMPLATE} (the reference)")
+    template_self_check(ctx["template"])
+    for_each(repos, doctor, ctx)
+
+
+def template_self_check(tpl: dict) -> None:
+    """The template's live rulesets against its .github/rulesets files, and what `hubra merge` needs."""
+    problems = []
+    try:
+        listing = api("GET", f"/repos/{TEMPLATE}/contents/.github/rulesets") or []
+        files = [f["name"] for f in listing if f.get("name", "").endswith(".json")]
+    except RuntimeError:
+        files = ["main.json", "tags.json"]
+    for f in files:
+        text = file_on(TEMPLATE, f".github/rulesets/{f}")
+        if not text:
+            continue
+        want = json.loads(text)
+        have = tpl["rulesets"].get(want.get("name"))
+        if not have:
+            problems.append(f"ruleset {want.get('name')} ({f}) isn't imported")
+        else:
+            problems += [f"ruleset {want['name']}: {d}" for d in ruleset_drift(have, want, against=f, subset=True)]
+    settings = [f"{k} is {compact(tpl['settings'].get(k))}, plugins should have {compact(v)}"
+                for k, v in PLUGIN_SETTINGS.items() if k in tpl["settings"] and tpl["settings"][k] != v]
+    for p in problems + settings:
+        say(f"   - {p}")
+    if problems:
+        say(f"   fix: {WEB}/{TEMPLATE}/settings/rules (import the files again)")
+    if settings:
+        say(f"   fix: {WEB}/{TEMPLATE}/settings (every plugin copies these on `hubra setup`)")
+    if not problems and not settings:
+        say("   ok")
+    rel = "on" if tpl["immutable_releases"] else "off"
+    say(f"   reference: {len(tpl['settings'])} settings, {len(tpl['rulesets'])} rulesets, release immutability {rel}")
 
 
 def doctor(repo: str, ctx: dict) -> None:
     problems: list[str] = []
-    info = api("GET", f"/repos/{repo}")
-    settings = (("delete_branch_on_merge", True), ("allow_auto_merge", True),
-                ("has_wiki", False), ("has_projects", False))
-    for key, want in settings if is_plugin(repo) else ():  # core repos: security only
-        if info.get(key) != want:
-            problems.append(f"{key} is {info.get(key)}, setup sets {want}")
-    sec = info.get("security_and_analysis") or {}
-    for key in ("secret_scanning", "secret_scanning_push_protection"):
-        if (sec.get(key) or {}).get("status") != "enabled":
-            problems.append(f"{key} is off")
-    try:
-        if not (api("GET", f"/repos/{repo}/private-vulnerability-reporting") or {}).get("enabled"):
+    if is_plugin(repo):
+        problems += state_drift(repo_state(repo), ctx["template"])
+    else:  # core repos keep their own settings and rulesets: security only
+        info = api("GET", f"/repos/{repo}")
+        sec = info.get("security_and_analysis") or {}
+        for key in ("secret_scanning", "secret_scanning_push_protection"):
+            if (sec.get(key) or {}).get("status") != "enabled":
+                problems.append(f"{key} is off")
+        if vulnerability_reporting(repo) is not True:
             problems.append("private vulnerability reporting is off")
-    except RuntimeError as err:
-        problems.append(f"private vulnerability reporting: {err}")
-
-    current = {r["name"]: r for r in api("GET", f"/repos/{repo}/rulesets") or []}
-    for want in ctx["rulesets"] if is_plugin(repo) else []:  # core repos keep their own rulesets
-        have = current.get(want["name"])
-        if not have:
-            problems.append(f"ruleset {want['name']} is missing")
-            continue
-        have = api("GET", f"/repos/{repo}/rulesets/{have['id']}") or {}
-        if have.get("enforcement") != want.get("enforcement"):
-            problems.append(f"ruleset {want['name']} is {have.get('enforcement')}")
-        missing = {r["type"] for r in want["rules"]} - {r["type"] for r in have.get("rules") or []}
-        if missing:
-            problems.append(f"ruleset {want['name']} lacks {', '.join(sorted(missing))}")
 
     if is_plugin(repo):
         try:
@@ -1044,7 +1232,7 @@ def doctor(repo: str, ctx: dict) -> None:
             if "HUBRA_SIGNING_KEY" not in {s.get("name") for s in secrets.get("secrets") or []}:
                 problems.append("HUBRA_SIGNING_KEY is not stored (hubra key)")
         ours = get_file(repo, ".github/workflows/release.yml")
-        if ours and ctx.get("workflow") and ours[1] != ctx["workflow"]:
+        if ours and ctx["template"].get("workflow") and ours[1] != ctx["template"]["workflow"]:
             problems.append("release.yml differs from the template's")
         elif not ours:
             problems.append("no .github/workflows/release.yml")
@@ -1057,7 +1245,7 @@ def doctor(repo: str, ctx: dict) -> None:
     if any("HUBRA_SIGNING_KEY" in p for p in problems) and len(problems) == 1:
         say(f"   fix: hubra key <keyfile> {short(repo).removeprefix(PREFIX)}")
     elif is_plugin(repo):
-        say(f"   fix: hubra setup {short(repo).removeprefix(PREFIX)}"
+        say(f"   fix: hubra setup {short(repo).removeprefix(PREFIX)}  (copies the template)"
             + ("   (release.yml: copy it from the template)" if any("release.yml" in p for p in problems) else ""))
 
 
@@ -1360,7 +1548,7 @@ def main() -> None:
         try:
             from hubra_cli import tui
         except ImportError as err:
-            sys.exit(f"The TUI needs Textual: pipx install 'hubra-cli[tui]' or pip install textual ({err})")
+            sys.exit(f"The TUI needs Textual: pipx inject hubra-cli textual (or pip install textual). {err}")
         return tui.run(dry_run=DRY_RUN)
 
     if args.cmd == "lists":
@@ -1426,8 +1614,7 @@ def main() -> None:
         return doctor_all(repos)
     if args.cmd == "setup":
         ctx["me"] = api("GET", "/user")
-        ctx["rulesets"] = [json.loads(file_on(TEMPLATE, f".github/rulesets/{f}.json"))
-                           for f in ("main", "tags")]
+        ctx["template"] = template_baseline()
 
     action = {"setup": setup, "merge": merge, "release": release,
               "ship": ship, "key": key_only}[args.cmd]

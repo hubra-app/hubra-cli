@@ -55,7 +55,7 @@ def test_merge_all_leaves_core_alone(env):
 
 def test_release_and_ship(env):
     out = hubra(env, "release", "budgets")
-    assert "released v1.2.0 (was v1.1.0)" in out
+    assert "tagged v1.2.0 on main" in out and "(was v1.1.0)" in out
     assert "releases/tag/v1.2.0" in out
     assert "actions/runs/" in out
     out = hubra(env, "ship", "--dry-run", "board", "discord")
@@ -128,7 +128,28 @@ def test_lists(env):
 
 def test_doctor(env):
     out = hubra(env, "doctor")
-    assert "has_wiki is True" in out and "ruleset tags is missing" in out and "fix: hubra setup budgets" in out
+    assert "has_wiki is true, template has false" in out and "ruleset tags is missing" in out
+    assert "fix: hubra setup budgets" in out
+    assert "release immutability is off, template has on" in out  # keys
+    assert "ruleset main: pull_request.required_approving_review_count is 1, template has 0" in out  # guides
+    assert "ruleset tags: lacks non_fast_forward, update" in out  # codes
+    assert "== hubra-app/hubra-plugins-template (the reference)\n   ok" in out
     assert "release.yml differs from the template's" in out
     assert "fix: hubra key <keyfile> discord" in out
     assert "== hubra-app/hubra\n   ok" in hubra(env, "doctor", "hubra")
+
+
+def test_release_pushes_a_tag_for_immutable_releases(env, tmp_path):
+    log = tmp_path / "calls.log"
+    out = hubra({**env, "FAKE_GH_LOG": str(log)}, "release", "budgets")
+    assert "tagged v1.2.0 on main" in out
+    calls = log.read_text()
+    assert "POST /repos/hubra-app/hubra-plugin-budgets/git/refs" in calls
+    assert "release create" not in calls
+
+
+def test_release_old_workflow_and_pending_tag(env):
+    out = hubra(env, "release", "--dry-run", "codes", "teams", "discord")
+    assert "[dry-run] publish release v1.1.0" in out  # codes: release.yml still on "published"
+    assert "v1.1.0 is tagged, the workflow creates the release" in out  # teams
+    assert "NO SIGNED ZIP" in out  # discord's release has no zip

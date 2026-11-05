@@ -26,6 +26,8 @@ for n in ["bank-import", "guides", "imap-inbox", "codes", "inventory", "document
           "kasse", "supporters", "booking", "teams", "community", "forms", "letters",
           "messengers", "assistant"]:
     PLUGINS[n] = (n, "1.0.0", ["v1.0.0"])
+PLUGINS["teams"] = ("teams", "1.1.0", ["v1.0.0"])  # tag v1.1.0 pushed, release not made yet
+PLUGINS["codes"] = ("codes", "1.1.0", ["v1.0.0"])  # still on the "release published" workflow
 REPOS = ["hubra", "hubra.club", "hubra-plugins", "hubra-plugins-template"] + [f"hubra-plugin-{n}" for n in PLUGINS]
 
 PRS = {
@@ -95,6 +97,23 @@ if argv[:2] == ["api", "graphql"]:
 
 RULES = {"main": ["deletion", "non_fast_forward", "pull_request", "required_status_checks"],
          "tags": ["deletion", "update", "non_fast_forward"]}
+PARAMS = {"pull_request": {"required_approving_review_count": 0, "allowed_merge_methods": ["merge", "squash"]},
+          "required_status_checks": {"required_status_checks": [{"context": "test", "integration_id": 15368}]}}
+TARGET = {"main": ("branch", "~DEFAULT_BRANCH"), "tags": ("tag", "refs/tags/v*")}
+
+
+def live_ruleset(repo, name):
+    """A ruleset as GitHub returns it: guides asks for one approval, codes lost rules."""
+    rules = RULES[name] if repo != "hubra-plugin-codes" else RULES[name][:1]
+    full = []
+    for t in rules:
+        params = dict(PARAMS.get(t, {}))
+        if repo == "hubra-plugin-guides" and t == "pull_request":
+            params["required_approving_review_count"] = 1
+        full.append({"type": t, "parameters": params} if params else {"type": t})
+    target, ref = TARGET[name]
+    return {"name": name, "target": target, "enforcement": "active",
+            "conditions": {"ref_name": {"include": [ref], "exclude": []}}, "rules": full, "bypass_actors": []}
 LISTS = {  # what the made-up plugin lists show
     "hubra/README.md": "| [Budgets](x) | y | [1.1.0](https://github.com/hubra-app/hubra-plugin-budgets/releases/tag/v1.1.0) |\n"
                        "| [Discord](x) | y | [2.5.0](https://github.com/hubra-app/hubra-plugin-discord/releases/tag/v2.5.0) |\n",
@@ -122,7 +141,7 @@ if argv[0] == "api":
     p = plugin_of(repo)
     if rest == "":
         out({"default_branch": "main", "delete_branch_on_merge": True, "allow_auto_merge": True,
-             "has_wiki": repo == "hubra-plugin-budgets", "has_projects": False,
+             "has_wiki": repo == "hubra-plugin-budgets", "has_projects": False, "allow_squash_merge": True,
              "security_and_analysis": {"secret_scanning": {"status": "enabled"},
                                        "secret_scanning_push_protection": {"status": "enabled"}}})
     if rest.startswith("/contents/plugin.yaml"):
@@ -137,15 +156,26 @@ if argv[0] == "api":
     if rest.startswith("/contents/.github/rulesets/"):
         name = rest.split("/")[-1][:-5]
         content(json.dumps({"name": name, "enforcement": "active", "rules": [{"type": t} for t in RULES[name]]}))
+    if rest == "/immutable-releases":
+        out({"enabled": repo != "hubra-plugin-keys", "enforced_by_owner": False})
     if rest.startswith("/contents/.github/workflows/release.yml"):
-        content("on: release", "codes-own" if repo == "hubra-plugin-codes" else "template-sha")
+        if repo in ("hubra-plugin-codes", "hubra-plugins-template"):  # still "release published"
+            content("on:\n  release:\n    types: [published]\n  push:\n    branches: [main]\njobs:\n",
+                    "template-sha" if repo == "hubra-plugins-template" else "codes-own")
+        content('on:\n  push:\n    branches: [main]\n    tags: ["v*"]\njobs:\n', "template-sha")
+    if rest.startswith("/git/ref/tags/"):
+        tag = rest.rsplit("/", 1)[-1]
+        if p and tag in p[2] or (repo == "hubra-plugin-teams" and tag == "v1.1.0"):
+            out({"object": {"sha": "tagsha"}})
+        fail("gh: Not Found (HTTP 404)")
     if rest.startswith("/contents/"):
         key = f"{repo}/{rest[len('/contents/'):].split('?')[0]}"
         if key in LISTS:
             content(LISTS[key])
         fail("gh: Not Found (HTTP 404)")
     if rest.startswith("/releases/tags/"):
-        out({"published_at": "2026-11-01T00:00:00Z"})
+        assets = [] if repo == "hubra-plugin-discord" else [{"name": "x-1.0.0.zip"}]
+        out({"published_at": "2026-11-01T00:00:00Z", "assets": assets})
     if rest.startswith("/releases"):
         out([{"tag_name": t} for t in (p[2] if p else [])])
     if rest.startswith("/pulls"):
@@ -161,9 +191,7 @@ if argv[0] == "api":
         out({"enabled": True})
     if rest.startswith("/rulesets/"):
         rid = int(rest.split("/")[2])
-        name = "main" if rid == 1 else "tags"
-        rules = RULES[name] if repo != "hubra-plugin-codes" else RULES[name][:1]
-        out({"name": name, "enforcement": "active", "rules": [{"type": t} for t in rules]})
+        out(live_ruleset(repo, "main" if rid == 1 else "tags"))
     if rest.startswith("/rulesets"):
         sets = [{"name": "main", "id": 1}]
         if repo != "hubra-plugin-budgets":
