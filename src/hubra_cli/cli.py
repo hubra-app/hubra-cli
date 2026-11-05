@@ -1490,14 +1490,13 @@ def verify(repo: str, ctx: dict) -> None:
         want = (download(f"/repos/{repo}/releases/assets/{sums['id']}").decode().split() or [""])[0]
         if hashlib.sha256(data).hexdigest() != want:
             problems.insert(0, f"{zips[0]} doesn't match {zips[0]}.sha256")
-    else:
-        problems.append(f"no {zips[0]}.sha256 on the release")
     if problems:
         say(f"   {tag} {zips[0]}: NOT OK  {rel.get('html_url', '')}")
         for p in problems:
             say(f"   - {p}")
     else:
-        say(f"   {tag} {zips[0]}: ok, signed with Hubra.pub ({plugin_key_id()}), sha256 matches")
+        say(f"   {tag} {zips[0]}: ok, signed with Hubra.pub ({plugin_key_id()})"
+            + (", sha256 matches" if sums else f" (no {zips[0]}.sha256: released before the tag workflow)"))
 
 
 
