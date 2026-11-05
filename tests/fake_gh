@@ -77,6 +77,9 @@ def repo_node(name, full):
                                                                 author={"login": "reykimedev"},
                                                                 commits={"nodes": [{"commit": {"statusCheckRollup": {"state": "PENDING"}}}]})
                                                            for x in prs]},
+        "merged": {"nodes": [{"number": 11, "title": "Budget charts", "mergedAt": "2026-11-05T09:00:00Z",
+                              "url": f"https://github.com/{ORG}/{name}/pull/11", "mergedBy": {"login": "reykimedev"}}]
+                   if name == "hubra-plugin-budgets" else []},
     })
     return node
 

@@ -257,6 +257,9 @@ query($org: String!, $cursor: String) {
             commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
           }
         }
+        merged: pullRequests(states: MERGED, first: 5, orderBy: {field: UPDATED_AT, direction: DESC}) {
+          nodes { number title url mergedAt mergedBy { login } }
+        }
       }
     }
   }
@@ -878,7 +881,17 @@ def open_page(repo: str, number: int | None, actions: bool, releases: bool) -> N
     elif releases:
         url += "/releases"
     say(url)
-    webbrowser.open(url)
+    if open_mode() == "browser":
+        webbrowser.open(url)
+
+
+def open_mode() -> str:
+    """How links open: HUBRA_OPEN=browser|copy|print. Over SSH the default is copy: a browser
+    would start on the remote machine (or a text browser inside the terminal)."""
+    mode = os.environ.get("HUBRA_OPEN", "").strip().lower()
+    if mode in ("browser", "copy", "print"):
+        return mode
+    return "copy" if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY") else "browser"
 
 
 # ── bump / lists / doctor ────────────────────────────────────────────────────
@@ -1574,18 +1587,26 @@ def self_path(token: str | None) -> str:
     return f"/api/v1/{side}/api-tokens/self"
 
 
-def login() -> None:
-    import getpass
-    token = getpass.getpass("Hubra API token (hbr_…): ").strip()
+def save_token(token: str) -> str:
+    """Check a Hubra API token against the API, keep it in TOKEN_FILE (mode 600) and say what it is."""
+    token = token.strip()
     if not token_kind(token):
-        sys.exit("That doesn't look like a Hubra API token (hbr_plat_…, hbr_club_… or hbr_pat_…)")
+        raise RuntimeError("That doesn't look like a Hubra API token (hbr_plat_…, hbr_club_… or hbr_pat_…)")
     me = hubra_get(self_path(token), token)
     os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
     fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(token + "\n")
-    print(f"Saved to {TOKEN_FILE}: {me.get('kind')} token \"{me.get('name')}\", "
-          f"scopes {', '.join(me.get('scopes') or []) or '-'}, expires {(me.get('expiresAt') or 'never')[:10]}")
+    return (f"Saved to {TOKEN_FILE}: {me.get('kind')} token \"{me.get('name')}\", "
+            f"scopes {', '.join(me.get('scopes') or []) or '-'}, expires {(me.get('expiresAt') or 'never')[:10]}")
+
+
+def login() -> None:
+    import getpass
+    try:
+        print(save_token(getpass.getpass("Hubra API token (hbr_…): ")))
+    except RuntimeError as err:
+        sys.exit(str(err))
 
 
 def logout() -> None:

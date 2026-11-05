@@ -94,6 +94,15 @@ checks it the way Hubra does before installing it: the `.sha256` file, the
 `SIGNATURE.json` key (must be Hubra.pub), every file hash, the Ed25519
 signature, and id and version against plugin.yaml and the tag.
 
+## Links over SSH
+
+Over SSH (`SSH_CONNECTION` set) a link doesn't start a browser on the server:
+Enter, `o` or a click copies the URL to your own clipboard (OSC 52, which
+iTerm2, kitty, WezTerm, Windows Terminal and tmux with `set -g set-clipboard
+on` pass on; iTerm2 asks once under Settings › General › Selection) and shows
+the full URL in the log to cmd/ctrl-click. `HUBRA_OPEN=browser`, `copy` or
+`print` picks the behaviour yourself.
+
 ## Hubra API
 
 `hubra hubra …` and the TUI's Hubra tab read the running Hubra with an API
