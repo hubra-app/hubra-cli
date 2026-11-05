@@ -30,7 +30,7 @@ hubra prs                     # every open PR with checks, review, link
 hubra pr budgets#12 --diff    # one PR in depth (--web opens it)
 hubra merge                   # auto-merge ready plugin PRs
 hubra merge budgets#12        # only this PR (--now merges at once, --ready un-drafts)
-hubra release                 # release new plugin.yaml versions, with run links
+hubra release                 # tag new plugin.yaml versions; the workflow signs and releases
 hubra ship                    # merge, then release
 hubra approve                 # approve signing runs waiting for you
 hubra runs --failed           # recent failed Actions runs
@@ -51,7 +51,9 @@ and `hubra <command> --help` explain every option. `--dry-run` shows what
 would change without changing anything.
 
 A plugin release goes: `hubra bump budgets` (PR with the new version and
-changelog) → merge → `hubra release budgets` → `hubra approve` (signing) →
+changelog) → merge → `hubra release budgets` (pushes the tag v<version>) →
+`hubra approve` (signing; release.yml then creates the release with the zip,
+so releases can be immutable) →
 `hubra lists --fix` (version bumps in the READMEs; new rows, hubra.club cards
 and the org profile stay yours, see hubra docs/plugin-releases.md).
 
