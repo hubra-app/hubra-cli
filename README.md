@@ -37,8 +37,8 @@ hubra runs --failed           # recent failed Actions runs
 hubra open budgets#12         # open a repo / PR / --actions / --releases page
 hubra bump budgets minor      # PR with plugin.yaml + CHANGELOG for the next version
 hubra lists                   # plugin lists vs releases (--fix opens PRs)
-hubra doctor                  # repo settings that drifted from what setup sets
-hubra setup                   # create new plugin repos, configure all
+hubra doctor                  # plugin repos that drifted from the template
+hubra setup                   # create new plugin repos, copy the template's setup
 hubra key signing.key         # store the plugin signing key
 hubra login                   # save a Hubra API token
 hubra hubra health            # also: alerts, errors, jobs, whoami, get PATH
@@ -57,6 +57,17 @@ so releases can be immutable) →
 `hubra lists --fix` (version bumps in the READMEs; new rows, hubra.club cards
 and the org profile stay yours, see hubra docs/plugin-releases.md).
 
+## The template is the reference
+
+`hubra-plugins-template` as it is on GitHub now is what every plugin repo
+should look like. `hubra doctor` compares each plugin with it: repo settings
+(merge buttons, auto-merge, wiki, …), security features, release immutability,
+private vulnerability reporting, every ruleset rule by rule (conditions,
+parameters, bypass) and release.yml. Change something in the template and every
+plugin shows it as drift; `hubra setup <name>` copies it over. doctor also
+checks the template itself: its live rulesets against its `.github/rulesets`
+files, and auto-merge, branch deletion, wiki and projects.
+
 ## Hubra API
 
 `hubra hubra …` and the TUI's Hubra tab read the running Hubra with an API
@@ -68,10 +79,15 @@ point at another install.
 
 ## TUI keys
 
-Tabs: Repos, Pull requests, Runs, Checks (plugin lists and doctor) and Hubra.
-`r` refresh · `o` open in browser · `m` auto-merge · `M` merge now · `y` mark
-ready · `d` diff · `R` release · `a` approve signing · `q` quit. Every change
-asks first; `hubra tui --dry-run` only shows what it would do.
+Tabs: Repos, Pull requests, Runs, Checks (plugin lists and doctor) and Hubra,
+in the Hubra colours (`t` switches to the light theme).
+`1`-`5` switch tabs and the arrow keys move right away · `Enter` or `o` open in
+the browser · `r` refresh · `m` auto-merge · `M` merge now · `y` mark ready ·
+`d` diff · `R` release · `a` approve signing · `q` quit. Links in the detail
+pane and the log are short labels you can click. Every change asks first;
+`hubra tui --dry-run` only shows what it would do.
+
+![Repo settings drift in the Checks tab](docs/screenshots/checks-doctor.png)
 
 ## Development
 

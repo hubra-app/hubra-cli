@@ -48,3 +48,43 @@ def test_tui_flow(env, monkeypatch):
             assert app.query_one("#prs-table").row_count == 4
 
     asyncio.run(run())
+
+
+def test_keyboard_links_and_theme(env, monkeypatch):
+    for key in ("PATH", "FAKE_GH_DELAY", "FAKE_GH_LOG", "HUBRA_API_URL", "HUBRA_TOKEN"):
+        monkeypatch.setenv(key, env[key])
+    from hubra_cli import cli, tui
+
+    monkeypatch.setattr(cli, "HUBRA_API", os.environ["HUBRA_API_URL"])
+    opened: list[str] = []
+    monkeypatch.setattr(tui.webbrowser, "open", opened.append)
+    cli.DRY_RUN = True
+
+    async def run():
+        app = tui.HubraTui(dry_run=True)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await pilot.pause(2)
+            assert app.theme == "hubra"
+            table = app.query_one("#repos-table")
+            assert app.focused is table  # arrows work without a click first
+            await pilot.press("down", "down")
+            assert table.cursor_row == 2
+            await pilot.press("2")
+            await pilot.pause(0.3)
+            assert app.query_one("#tabs").active == "prs"
+            assert app.focused is app.query_one("#prs-table")
+            await pilot.press("1", "enter")
+            await pilot.pause(0.3)
+            assert opened and opened[-1].startswith("https://github.com/hubra-app/")
+            # a long URL becomes one short clickable label, never split over two lines
+            text = tui.linkify("PR https://github.com/hubra-app/hubra-plugin-budgets/pull/12 done")
+            assert text.plain == "PR hubra-plugin-budgets/pull/12 done"
+            meta = [span.style.meta for span in text.spans if hasattr(span.style, "meta")]
+            assert meta == [{"@click": "app.open_link('https://github.com/hubra-app/hubra-plugin-budgets/pull/12')"}]
+            app.action_open_link("https://example.org/x")
+            assert opened[-1] == "https://example.org/x"
+            await pilot.press("t")
+            assert app.theme == "hubra-light"
+            await pilot.pause(1)
+
+    asyncio.run(run())

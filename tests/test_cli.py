@@ -128,7 +128,12 @@ def test_lists(env):
 
 def test_doctor(env):
     out = hubra(env, "doctor")
-    assert "has_wiki is True" in out and "ruleset tags is missing" in out and "fix: hubra setup budgets" in out
+    assert "has_wiki is true, template has false" in out and "ruleset tags is missing" in out
+    assert "fix: hubra setup budgets" in out
+    assert "release immutability is off, template has on" in out  # keys
+    assert "ruleset main: pull_request.required_approving_review_count is 1, template has 0" in out  # guides
+    assert "ruleset tags: lacks non_fast_forward, update" in out  # codes
+    assert "== hubra-app/hubra-plugins-template (the reference)\n   ok" in out
     assert "release.yml differs from the template's" in out
     assert "fix: hubra key <keyfile> discord" in out
     assert "== hubra-app/hubra\n   ok" in hubra(env, "doctor", "hubra")
