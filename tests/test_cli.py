@@ -134,6 +134,8 @@ def test_doctor(env):
     assert "ruleset main: pull_request.required_approving_review_count is 1, template has 0" in out  # guides
     assert "ruleset tags: lacks non_fast_forward, update" in out  # codes
     assert "== hubra-app/hubra-plugins-template (the reference)\n   ok" in out
+    assert "ruleset nightly (.github/rulesets/nightly.json) isn't imported" in out  # booking's own ruleset
+    assert "hubra-plugin-booking/settings/rules" in out
     assert "release.yml differs from the template's" in out
     assert "fix: hubra key <keyfile> discord" in out
     assert "== hubra-app/hubra\n   ok" in hubra(env, "doctor", "hubra")

@@ -68,6 +68,13 @@ plugin shows it as drift; `hubra setup <name>` copies it over. doctor also
 checks the template itself: its live rulesets against its `.github/rulesets`
 files, and auto-merge, branch deletion, wiki and projects.
 
+Each repo's own `.github/rulesets/*.json` files count too. doctor reports a
+file that isn't imported or differs from the live ruleset, a plugin's file that
+differs from the template's file of the same name, and a live ruleset that is
+neither in the template nor in the repo's files. Core repos (hubra, …) are
+checked against their own files only. `hubra setup` imports a plugin's extra
+rulesets (names the template doesn't have) from its files.
+
 ## Hubra API
 
 `hubra hubra …` and the TUI's Hubra tab read the running Hubra with an API

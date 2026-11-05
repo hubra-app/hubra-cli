@@ -73,10 +73,13 @@ doctor   Compares each plugin repo with hubra-plugins-template as it is on
          release.yml. A change in the template shows up as drift in every
          plugin. Also checks the plugin-signing environment and its key, and
          the template's live rulesets against its .github/rulesets files.
+         Rulesets in a repo's own .github/rulesets files (custom ones too)
+         must match what is live; core repos are checked against theirs.
 setup    Creates the plugins in NEW_PLUGINS that don't exist yet from
          hubra-plugins-template, then copies the template's settings,
          security features, release immutability and rulesets (replaced by
-         name) to every named plugin repo, and sets the plugin-signing
+         name) to every named plugin repo, imports the repo's own extra
+         rulesets from .github/rulesets, and sets the plugin-signing
          environment (you as reviewer, only v* tags).
 key      Stores the private key of Hubra.pub as HUBRA_SIGNING_KEY in each
          repo's plugin-signing environment, piped to `gh secret set` (gh
@@ -416,6 +419,15 @@ def setup(repo: str, ctx: dict) -> None:
             api("POST", f"/repos/{repo}/rulesets", body)
     say(f"   settings, security, release immutability and rulesets ({', '.join(tpl['rulesets'])}) "
         "copied from the template")
+    custom = {n: rs for n, (_, rs) in ruleset_files(repo).items() if n not in tpl["rulesets"] and not rs.get("_broken")}
+    for name, ruleset in custom.items():
+        body = {k: ruleset[k] for k in RULESET_FIELDS if k in ruleset}
+        if name in current:
+            api("PUT", f"/repos/{repo}/rulesets/{current[name]}", body)
+        else:
+            api("POST", f"/repos/{repo}/rulesets", body)
+    if custom:
+        say(f"   the repo's own rulesets ({', '.join(custom)}) imported from .github/rulesets")
 
     api("PUT", f"/repos/{repo}/environments/plugin-signing", {
         "reviewers": [{"type": "User", "id": ctx["me"]["id"]}],
@@ -1083,6 +1095,7 @@ def repo_state(repo: str) -> dict:
 
 def template_baseline() -> dict:
     tpl = repo_state(TEMPLATE)
+    tpl["files"] = ruleset_files(TEMPLATE)
     workflow = get_file(TEMPLATE, ".github/workflows/release.yml")
     tpl["workflow"] = workflow[1] if workflow else None
     return tpl
@@ -1132,7 +1145,7 @@ def ruleset_drift(have: dict, want: dict, against: str = "template", subset: boo
     return out
 
 
-def state_drift(have: dict, tpl: dict) -> list[str]:
+def state_drift(have: dict, tpl: dict, own: dict | None = None) -> list[str]:
     """Settings, security, release immutability and rulesets that differ from the template."""
     problems = []
     for key, want in tpl["settings"].items():
@@ -1153,8 +1166,43 @@ def state_drift(have: dict, tpl: dict) -> list[str]:
             problems.append(f"ruleset {name} is missing")
         else:
             problems += [f"ruleset {name}: {d}" for d in ruleset_drift(have["rulesets"][name], want)]
-    for name in sorted(set(have["rulesets"]) - set(tpl["rulesets"])):
-        problems.append(f"ruleset {name} isn't in the template")
+    for name in sorted(set(have["rulesets"]) - set(tpl["rulesets"]) - set(own or {})):
+        problems.append(f"ruleset {name} is neither in the template nor in .github/rulesets")
+    return problems
+
+
+def ruleset_files(repo: str) -> dict[str, tuple[str, dict]]:
+    """The repo's own .github/rulesets/*.json, by ruleset name: {name: (file, ruleset)}."""
+    try:
+        listing = api("GET", f"/repos/{repo}/contents/.github/rulesets") or []
+    except RuntimeError:
+        return {}
+    out = {}
+    for f in sorted(x["name"] for x in listing if isinstance(x, dict) and x.get("name", "").endswith(".json")):
+        text = file_on(repo, f".github/rulesets/{f}")
+        try:
+            rs = json.loads(text) if text else None
+        except ValueError:
+            rs = {"name": f, "_broken": True}
+        if rs:
+            out[rs.get("name") or f] = (f, rs)
+    return out
+
+
+def files_drift(live: dict[str, dict], own: dict[str, tuple[str, dict]],
+                tpl_files: dict[str, tuple[str, dict]] | None = None) -> list[str]:
+    """The repo's live rulesets against its own .github/rulesets files (and those files against the template's)."""
+    problems = []
+    for name, (f, want) in own.items():
+        if want.get("_broken"):
+            problems.append(f".github/rulesets/{f} isn't valid JSON")
+            continue
+        if name not in live:
+            problems.append(f"ruleset {name} (.github/rulesets/{f}) isn't imported")
+        else:
+            problems += [f"ruleset {name}: {d}" for d in ruleset_drift(live[name], want, against=f, subset=True)]
+        if tpl_files and name in tpl_files and tpl_files[name][1] != want:
+            problems.append(f".github/rulesets/{f} differs from the template's {tpl_files[name][0]}")
     return problems
 
 
@@ -1171,22 +1219,7 @@ def doctor_all(repos: list[str]) -> None:
 
 def template_self_check(tpl: dict) -> None:
     """The template's live rulesets against its .github/rulesets files, and what `hubra merge` needs."""
-    problems = []
-    try:
-        listing = api("GET", f"/repos/{TEMPLATE}/contents/.github/rulesets") or []
-        files = [f["name"] for f in listing if f.get("name", "").endswith(".json")]
-    except RuntimeError:
-        files = ["main.json", "tags.json"]
-    for f in files:
-        text = file_on(TEMPLATE, f".github/rulesets/{f}")
-        if not text:
-            continue
-        want = json.loads(text)
-        have = tpl["rulesets"].get(want.get("name"))
-        if not have:
-            problems.append(f"ruleset {want.get('name')} ({f}) isn't imported")
-        else:
-            problems += [f"ruleset {want['name']}: {d}" for d in ruleset_drift(have, want, against=f, subset=True)]
+    problems = files_drift(tpl["rulesets"], tpl.get("files") or {})
     settings = [f"{k} is {compact(tpl['settings'].get(k))}, plugins should have {compact(v)}"
                 for k, v in PLUGIN_SETTINGS.items() if k in tpl["settings"] and tpl["settings"][k] != v]
     for p in problems + settings:
@@ -1203,9 +1236,16 @@ def template_self_check(tpl: dict) -> None:
 
 def doctor(repo: str, ctx: dict) -> None:
     problems: list[str] = []
+    own = ruleset_files(repo)
     if is_plugin(repo):
-        problems += state_drift(repo_state(repo), ctx["template"])
-    else:  # core repos keep their own settings and rulesets: security only
+        state = repo_state(repo)
+        problems += state_drift(state, ctx["template"], own)
+        problems += files_drift(state["rulesets"], own, ctx["template"].get("files"))
+    else:  # core repos keep their own settings; their rulesets follow their own files
+        live = live_rulesets(repo)
+        problems += files_drift(live, own)
+        if own:
+            problems += [f"ruleset {n} has no file in .github/rulesets" for n in sorted(set(live) - set(own))]
         info = api("GET", f"/repos/{repo}")
         sec = info.get("security_and_analysis") or {}
         for key in ("secret_scanning", "secret_scanning_push_protection"):
@@ -1242,6 +1282,8 @@ def doctor(repo: str, ctx: dict) -> None:
         return
     for p in problems:
         say(f"   - {p}")
+    if any(".github/rulesets/" in p or ".json has" in p for p in problems):
+        say(f"   fix: {WEB}/{repo}/settings/rules (import the repo's .github/rulesets files)")
     if any("HUBRA_SIGNING_KEY" in p for p in problems) and len(problems) == 1:
         say(f"   fix: hubra key <keyfile> {short(repo).removeprefix(PREFIX)}")
     elif is_plugin(repo):
