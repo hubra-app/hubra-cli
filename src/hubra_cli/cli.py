@@ -14,15 +14,21 @@ Every call goes through gh, so no token is handled here.
     hubra approve                   # approve waiting signing runs
     hubra runs budgets --failed     # recent Actions runs, with links
     hubra open budgets#12           # open a repo/PR/Actions page
+    hubra bump budgets minor        # PR: plugin.yaml + CHANGELOG for the next version
+    hubra lists                     # are the plugin lists current? (--fix opens PRs)
+    hubra doctor                    # settings that drifted from what setup sets
     hubra setup                     # create new plugin repos, configure all
     hubra setup --key signing.key   # ... and store the signing key
     hubra key signing.key           # only store the signing key
+    hubra login                     # save a Hubra API token
+    hubra hubra health              # also alerts, errors, jobs, whoami, get PATH
+    hubra tui                       # everything on one screen (the [tui] extra)
 
 Every command takes repo names after it: a plugin by its short name
 (`budgets`), or a core repo (`hubra`, `hubra.club`, `hubra-plugins`).
 `name#12` (or a PR URL) names one pull request. Without names, `status`,
-`prs` and `runs` cover everything; setup, key, merge, release, ship and
-approve cover all hubra-plugin-* repos. Core repos are merged only when you
+`prs` and `runs` cover everything; setup, key, merge, release, ship,
+approve and doctor cover all hubra-plugin-* repos. Core repos are merged only when you
 name them (`merge hubra` or `merge hubra#190`). `--dry-run` shows what would
 change.
 
@@ -51,6 +57,17 @@ approve  Lists release runs waiting for the plugin-signing environment and
 runs     The latest Actions runs per repo (--limit 3) with links; --failed
          shows only failed ones.
 open     Opens a repo, name#12, or with --actions / --releases those pages.
+bump     Opens a PR on release/v<new> that sets plugin.yaml to the next
+         version (minor by default; major, patch or 1.4.0) and adds a
+         CHANGELOG.md section listing the PRs merged since the last release.
+         --auto-merge merges it once checks pass; then `release` publishes.
+lists    Compares the latest release of each plugin with the hubra README,
+         the Marketplace README, the org profile and the hubra.club Modules
+         cards. --fix opens PRs for outdated versions in the two READMEs
+         (new rows, cards and the org profile stay yours).
+doctor   Checks each repo against what setup sets (settings, security,
+         rulesets, plugin-signing environment and its key, release.yml as in
+         the template) and names the command that fixes it.
 setup    Creates the plugins in NEW_PLUGINS that don't exist yet from
          hubra-plugins-template, then configures every named plugin repo:
          no wiki/projects, delete merged branches, auto-merge allowed,
@@ -144,15 +161,15 @@ def for_each(repos: list[str], action, ctx: dict, parallel: bool = True) -> None
 
     if not parallel:
         for repo in repos:
-            print(f"== {repo}", flush=True)
+            say(f"== {repo}")
             try:
                 action(repo, ctx)
             except RuntimeError as err:
-                print(f"   error: {err}")
+                say(f"   error: {err}")
         return
     with ThreadPoolExecutor(WORKERS) as pool:
         for lines in pool.map(one, repos):
-            print("\n".join(lines), flush=True)
+            say("\n".join(lines))
 
 
 # ── gh ───────────────────────────────────────────────────────────────────────
@@ -765,6 +782,285 @@ def open_page(repo: str, number: int | None, actions: bool, releases: bool) -> N
     webbrowser.open(url)
 
 
+# ── bump / lists / doctor ────────────────────────────────────────────────────
+
+
+def get_file(repo: str, path: str, ref: str | None = None) -> tuple[str, str] | None:
+    """(text, blob sha) of a file, or None when it doesn't exist."""
+    q = f"?ref={ref}" if ref else ""
+    try:
+        data = api("GET", f"/repos/{repo}/contents/{path}{q}")
+    except RuntimeError as err:
+        if "404" in str(err) or "Not Found" in str(err):
+            return None
+        raise
+    return base64.b64decode(data["content"]).decode(), data["sha"]
+
+
+def open_pr(repo: str, base: str, branch: str, files: dict[str, tuple[str, str | None]],
+            message: str, title: str, body: str) -> str:
+    """Commit `files` ({path: (new text, old blob sha or None)}) on a new branch and open a PR."""
+    head = api("GET", f"/repos/{repo}/git/ref/heads/{base}")["object"]["sha"]
+    api("POST", f"/repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": head})
+    for path, (text, sha) in files.items():
+        body_ = {"message": message, "branch": branch,
+                 "content": base64.b64encode(text.encode()).decode()}
+        if sha:
+            body_["sha"] = sha
+        api("PUT", f"/repos/{repo}/contents/{path}", body_)
+    return gh("pr", "create", "--repo", repo, "--base", base, "--head", branch,
+              "--title", title, "--body", body).strip()
+
+
+def next_version(current: str, level: str) -> str:
+    if re.fullmatch(r"\d+\.\d+\.\d+", level):
+        return level
+    major, minor, patch = version_tuple(current)
+    if level == "major":
+        return f"{major + 1}.0.0"
+    if level == "minor":
+        return f"{major}.{minor + 1}.0"
+    if level == "patch":
+        return f"{major}.{minor}.{patch + 1}"
+    raise RuntimeError(f"bump takes major, minor, patch or a version like 1.4.0, not {level!r}")
+
+
+def merged_since_release(repo: str, base: str, tag: str | None) -> list[dict]:
+    """PRs merged into `base` after the release `tag` was published (all, without a tag)."""
+    since = ""
+    if tag:
+        since = (api("GET", f"/repos/{repo}/releases/tags/{tag}") or {}).get("published_at") or ""
+    pulls = api("GET", f"/repos/{repo}/pulls?state=closed&base={base}&sort=updated&direction=desc&per_page=50") or []
+    out = [p for p in pulls if p.get("merged_at") and p["merged_at"] > since
+           and not re.match(r"(?i)release \d", p.get("title") or "")]
+    return sorted(out, key=lambda p: p["merged_at"])
+
+
+def with_changelog_section(text: str | None, version: str, lines: list[str]) -> str | None:
+    """CHANGELOG.md with a `## version` section on top; None when it already has one."""
+    text = text or "# Changelog\n"
+    if re.search(rf"^## \[?{re.escape(version)}\]?\s*$", text, re.M):
+        return None
+    section = f"## {version}\n\n" + "\n".join(lines or ["- "]) + "\n\n"
+    m = re.search(r"^## ", text, re.M)
+    if m:
+        return text[:m.start()] + section + text[m.start():]
+    return text.rstrip("\n") + "\n\n" + section
+
+
+def bump(repo: str, ctx: dict) -> None:
+    if not is_plugin(repo):
+        say("   not a plugin, skipped")
+        return
+    base = api("GET", f"/repos/{repo}")["default_branch"]
+    found = get_file(repo, "plugin.yaml", base)
+    m = parse_manifest(found[0]) if found else None
+    if not m:
+        say("   no plugin.yaml, skipped")
+        return
+    if m[0] == "example":
+        say("   still the template's example plugin, skipped")
+        return
+    pid, cur = m
+    new = next_version(cur, ctx["level"])
+    if version_tuple(new) <= version_tuple(cur):
+        raise RuntimeError(f"{new} is not newer than {cur} in plugin.yaml")
+    last = newest(release_tags(repo))
+    if last and version_tuple(cur) > version_tuple(last):
+        say(f"   note: {cur} in plugin.yaml isn't released yet (latest {last}); `hubra release` would publish it")
+    prs = merged_since_release(repo, base, last)
+    notes = [f"- {p['title']} (#{p['number']})" for p in prs]
+    yaml_text = re.sub(r"^(version:\s*[\"']?)[^\"'\s]+", rf"\g<1>{new}", found[0], count=1, flags=re.M)
+    cl = get_file(repo, "CHANGELOG.md", base)
+    cl_text = with_changelog_section(cl[0] if cl else None, new, notes)
+    branch = f"release/v{new}"
+    say(f"   {pid} {cur} -> {new}, {len(prs)} PR(s) merged since {last or 'the start'}")
+    for line in notes or ["   (no merged PRs found: write the changelog lines in the PR)"]:
+        say(f"      {line}")
+    if DRY_RUN:
+        say(f"   [dry-run] branch {branch}: plugin.yaml version {new}"
+            f"{', CHANGELOG.md section ## ' + new if cl_text else ''}; PR 'Release {new}'")
+        return
+    files = {"plugin.yaml": (yaml_text, found[1])}
+    if cl_text:
+        files["CHANGELOG.md"] = (cl_text, cl[1] if cl else None)
+    body = (f"Bumps `plugin.yaml` to {new} and adds the CHANGELOG section (from the PRs merged since "
+            f"{last or 'the start'}). Edit the changelog here before merging.\n\n"
+            f"After the merge, `hubra release {short(repo).removeprefix(PREFIX)}` publishes v{new}; "
+            "the release workflow signs it once you approve.")
+    url = open_pr(repo, base, branch, files, f"Release {new}", f"Release {new}", body)
+    say(f"   opened {url}")
+    if ctx.get("auto"):
+        proc = subprocess.run(["gh", "pr", "merge", url.rsplit("/", 1)[-1], "--repo", repo,
+                               "--squash", "--auto", "--delete-branch"],
+                              capture_output=True, text=True, check=False)
+        say("   auto-merge on" if proc.returncode == 0 else f"   auto-merge not set: {proc.stderr.strip()[:200]}")
+
+
+# Where the plugins are listed (docs/plugin-releases.md in hubra).
+VERSION_LISTS = [
+    ("hubra README", f"{ORG}/hubra", "README.md"),
+    ("Marketplace README", f"{ORG}/hubra-plugins", "README.md"),
+    ("org profile", f"{ORG}/.github", "profile/README.md"),
+]
+CARD_LISTS = [
+    ("hubra.club DE", f"{ORG}/hubra.club", "src/pages/module.html"),
+    ("hubra.club EN", f"{ORG}/hubra.club", "src/pages/en/modules.html"),
+]
+
+
+def listed_version(text: str, name: str) -> str | None:
+    m = re.search(rf"{ORG}/{PREFIX}{re.escape(name)}/releases/tag/v([\w.\-]+)\)", text)
+    return m.group(1) if m else None
+
+
+def lists(fix: bool) -> None:
+    info = org_repos(full_info=True)
+    released = {}
+    for repo_name, node in sorted(info.items()):
+        if not repo_name.startswith(PREFIX):
+            continue
+        m = parse_manifest((node.get("manifest") or {}).get("text"))
+        last = newest([r["tagName"] for r in node["releases"]["nodes"]])
+        if last and not (m and m[0] == "example"):
+            released[repo_name.removeprefix(PREFIX)] = last.lstrip("v")
+    sources = {}
+    for label, repo, path in VERSION_LISTS + CARD_LISTS:
+        try:
+            sources[label] = get_file(repo, path)
+        except RuntimeError as err:
+            sources[label] = None
+            say(f"can't read {repo}/{path}: {err}")
+    head = ["plugin", "released"] + [label for label, _, _ in VERSION_LISTS + CARD_LISTS]
+    rows, stale = [], {}
+    for name, ver in released.items():
+        row = [name, ver]
+        for label, repo, path in VERSION_LISTS:
+            src = sources.get(label)
+            if not src:
+                row.append("?")
+                continue
+            shown = listed_version(src[0], name)
+            if shown == ver:
+                row.append("ok")
+            else:
+                row.append(f"shows {shown}" if shown else "missing")
+                if shown:
+                    stale.setdefault((repo, path), []).append((name, shown, ver))
+        for label, _, _ in CARD_LISTS:
+            src = sources.get(label)
+            row.append("?" if not src else ("ok" if f'data-plugin="{name}"' in src[0] else "no card"))
+        rows.append(row)
+    behind = [r for r in rows if any(c != "ok" for c in r[2:])]
+    current = [r[0] for r in rows if r not in behind]
+    if behind:
+        table(head, behind)
+    if current:
+        say(f"{chr(10) if behind else ''}Current everywhere: {', '.join(current)}")
+    todo = sum(1 for r in behind for c in r[2:] if c != "ok")
+    if not todo:
+        return
+    say(f"\n{todo} place(s) to update (hubra docs/plugin-releases.md). New rows and cards need a description,"
+        " so they stay yours; the org profile is edited in the GitHub web UI.")
+    if not stale:
+        return
+    for (repo, path), changes in stale.items():
+        if repo.endswith("/.github"):
+            continue
+        what = ", ".join(f"{n} {a} -> {b}" for n, a, b in changes)
+        if not fix:
+            say(f"  {short(repo)}/{path}: {what}  (--fix opens a PR)")
+            continue
+        text, sha = sources[next(lbl for lbl, r, p in VERSION_LISTS if (r, p) == (repo, path))]
+        for name, _, ver in changes:
+            text = re.sub(rf"\[[\w.\-]+\]\((https://github\.com/{ORG}/{PREFIX}{re.escape(name)}/releases/tag/)v[\w.\-]+\)",
+                          rf"[{ver}](\g<1>v{ver})", text)
+        if DRY_RUN:
+            say(f"  [dry-run] PR on {short(repo)}: {path}: {what}")
+            continue
+        branch = f"docs/plugin-versions-{datetime.now(timezone.utc):%Y%m%d-%H%M}"
+        base = api("GET", f"/repos/{repo}")["default_branch"]
+        url = open_pr(repo, base, branch, {path: (text, sha)}, "docs: current plugin versions",
+                      "docs: current plugin versions", f"Updates the plugin versions to the latest releases: {what}.")
+        say(f"  {short(repo)}: {url}")
+
+
+def doctor_ctx() -> dict:
+    workflow = get_file(TEMPLATE, ".github/workflows/release.yml")
+    return {"rulesets": [json.loads(file_on(TEMPLATE, f".github/rulesets/{f}.json")) for f in ("main", "tags")],
+            "workflow": workflow[1] if workflow else None}
+
+
+def doctor_all(repos: list[str]) -> None:
+    for_each(repos, doctor, doctor_ctx())
+
+
+def doctor(repo: str, ctx: dict) -> None:
+    problems: list[str] = []
+    info = api("GET", f"/repos/{repo}")
+    settings = (("delete_branch_on_merge", True), ("allow_auto_merge", True),
+                ("has_wiki", False), ("has_projects", False))
+    for key, want in settings if is_plugin(repo) else ():  # core repos: security only
+        if info.get(key) != want:
+            problems.append(f"{key} is {info.get(key)}, setup sets {want}")
+    sec = info.get("security_and_analysis") or {}
+    for key in ("secret_scanning", "secret_scanning_push_protection"):
+        if (sec.get(key) or {}).get("status") != "enabled":
+            problems.append(f"{key} is off")
+    try:
+        if not (api("GET", f"/repos/{repo}/private-vulnerability-reporting") or {}).get("enabled"):
+            problems.append("private vulnerability reporting is off")
+    except RuntimeError as err:
+        problems.append(f"private vulnerability reporting: {err}")
+
+    current = {r["name"]: r for r in api("GET", f"/repos/{repo}/rulesets") or []}
+    for want in ctx["rulesets"] if is_plugin(repo) else []:  # core repos keep their own rulesets
+        have = current.get(want["name"])
+        if not have:
+            problems.append(f"ruleset {want['name']} is missing")
+            continue
+        have = api("GET", f"/repos/{repo}/rulesets/{have['id']}") or {}
+        if have.get("enforcement") != want.get("enforcement"):
+            problems.append(f"ruleset {want['name']} is {have.get('enforcement')}")
+        missing = {r["type"] for r in want["rules"]} - {r["type"] for r in have.get("rules") or []}
+        if missing:
+            problems.append(f"ruleset {want['name']} lacks {', '.join(sorted(missing))}")
+
+    if is_plugin(repo):
+        try:
+            env = api("GET", f"/repos/{repo}/environments/plugin-signing")
+        except RuntimeError:
+            env = None
+        if not env:
+            problems.append("no plugin-signing environment")
+        else:
+            rules = env.get("protection_rules") or []
+            if not any(r.get("type") == "required_reviewers" and r.get("reviewers") for r in rules):
+                problems.append("plugin-signing has no required reviewer")
+            policies = api("GET", f"/repos/{repo}/environments/plugin-signing/deployment-branch-policies") or {}
+            if not any(p.get("name") == "v*" and p.get("type") == "tag" for p in policies.get("branch_policies") or []):
+                problems.append("plugin-signing doesn't limit deployments to v* tags")
+            secrets = api("GET", f"/repos/{repo}/environments/plugin-signing/secrets") or {}
+            if "HUBRA_SIGNING_KEY" not in {s.get("name") for s in secrets.get("secrets") or []}:
+                problems.append("HUBRA_SIGNING_KEY is not stored (hubra key)")
+        ours = get_file(repo, ".github/workflows/release.yml")
+        if ours and ctx.get("workflow") and ours[1] != ctx["workflow"]:
+            problems.append("release.yml differs from the template's")
+        elif not ours:
+            problems.append("no .github/workflows/release.yml")
+
+    if not problems:
+        say("   ok")
+        return
+    for p in problems:
+        say(f"   - {p}")
+    if any("HUBRA_SIGNING_KEY" in p for p in problems) and len(problems) == 1:
+        say(f"   fix: hubra key <keyfile> {short(repo).removeprefix(PREFIX)}")
+    elif is_plugin(repo):
+        say(f"   fix: hubra setup {short(repo).removeprefix(PREFIX)}"
+            + ("   (release.yml: copy it from the template)" if any("release.yml" in p for p in problems) else ""))
+
+
 # ── Hubra API ────────────────────────────────────────────────────────────────
 # Reads the running Hubra with an API token (manage › API-Tokens for a
 # platform token, club app Settings › API for a club or personal one). The
@@ -992,7 +1288,7 @@ def main() -> None:
                                 epilog=__doc__.split("\n\n", 1)[1])
     sub = p.add_subparsers(dest="cmd", required=True)
     names_help = "plugin short names, hubra, hubra.club, hubra-plugins; name#12 for one PR"
-    for cmd in ("status", "prs", "pr", "merge", "release", "ship", "approve", "runs", "open", "setup", "key"):
+    for cmd in ("status", "prs", "pr", "merge", "release", "ship", "approve", "runs", "open", "doctor", "setup", "key"):
         sp = sub.add_parser(cmd)
         if cmd == "key":
             sp.add_argument("keyfile", help="private key (PEM) of Hubra.pub")
@@ -1019,6 +1315,14 @@ def main() -> None:
         if cmd == "runs":
             sp.add_argument("--limit", type=int, default=3)
             sp.add_argument("--failed", action="store_true")
+    sp = sub.add_parser("bump", help="open a PR that bumps a plugin's version and changelog")
+    sp.add_argument("name", help="plugin short name, e.g. budgets")
+    sp.add_argument("level", nargs="?", default="minor", help="major, minor (default), patch or 1.4.0")
+    sp.add_argument("--auto-merge", action="store_true", help="turn on auto-merge for the PR")
+    sp.add_argument("--dry-run", action="store_true")
+    sp = sub.add_parser("lists", help="check the plugin lists against the releases")
+    sp.add_argument("--fix", action="store_true", help="open PRs for outdated versions")
+    sp.add_argument("--dry-run", action="store_true")
     sp = sub.add_parser("hubra", help="read the running Hubra with your API token")
     sp.add_argument("view", choices=[*HUBRA_VIEWS, "get"], nargs="?", default="health")
     sp.add_argument("path", nargs="?", help="for get: an API path like /api/v1/platform/jobs")
@@ -1058,6 +1362,17 @@ def main() -> None:
         except ImportError as err:
             sys.exit(f"The TUI needs Textual: pipx install 'hubra-cli[tui]' or pip install textual ({err})")
         return tui.run(dry_run=DRY_RUN)
+
+    if args.cmd == "lists":
+        try:
+            return lists(args.fix)
+        except RuntimeError as err:
+            sys.exit(str(err))
+    if args.cmd == "bump":
+        repo = full(args.name)
+        if repo not in {full(n) for n in plugin_names()}:
+            sys.exit(f"Unknown plugin: {args.name}")
+        return for_each([repo], bump, {"level": args.level, "auto": args.auto_merge}, parallel=False)
 
     if args.cmd in ("pr", "open"):
         repo, number = parse_target(args.target)
@@ -1107,6 +1422,8 @@ def main() -> None:
         ctx["key"] = read_key(keyfile)
     if args.cmd in ("setup", "key") and any(not is_plugin(r) for r in repos):
         sys.exit("setup and key are for plugin repos only")
+    if args.cmd == "doctor":
+        return doctor_all(repos)
     if args.cmd == "setup":
         ctx["me"] = api("GET", "/user")
         ctx["rulesets"] = [json.loads(file_on(TEMPLATE, f".github/rulesets/{f}.json"))

@@ -36,8 +36,12 @@ def test_tui_flow(env, monkeypatch):
             await pilot.pause(0.3)
             await pilot.press("y")
             await pilot.pause(1.5)
+            app.query_one("#tabs").active = "checks"
+            await pilot.pause(1.5)
+            assert "shows 1.0.0" in str(app.query_one("#checks-detail").render())
             app.query_one("#tabs").active = "hubra"
             await pilot.pause(1.5)
+            assert "12 commits behind main" in str(app.query_one("#hubra-detail").render())
             log = [str(line.text) for line in app.query_one("#log").lines]
             assert any("[dry-run] release v1.2.0" in line for line in log), log
             assert any("[dry-run] approve hubra-plugin-discord v2.5.0" in line for line in log), log

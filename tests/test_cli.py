@@ -94,3 +94,41 @@ def test_hubra_errors_are_readable(env):
     assert "Hubra answered 401" in hubra(bad, "hubra", "health")
     none = {**env, "HUBRA_TOKEN": ""}
     assert "No Hubra token" in hubra(none, "hubra")
+
+
+def test_bump(env):
+    out = hubra(env, "bump", "budgets", "--dry-run")
+    assert "budgets 1.2.0 -> 1.3.0" in out
+    assert "- Budget source for tiers (#7)" in out
+    assert "Release 1.2.0" not in out and "Older" not in out
+    assert "isn't released yet" in out
+    out = hubra(env, "bump", "budgets", "patch", "--auto-merge")
+    assert "opened https://github.com/hubra-app/hubra-plugin-budgets/pull/99" in out
+    assert "auto-merge on" in out
+    assert "not newer than 1.2.0" in hubra(env, "bump", "budgets", "1.1.5")
+    assert "example plugin" in hubra(env, "bump", "board")
+
+
+def test_changelog_section():
+    from hubra_cli.cli import with_changelog_section
+
+    text = "# Changelog\n\n## 1.2.0\n\n- a\n"
+    assert with_changelog_section(text, "1.3.0", ["- b"]) == "# Changelog\n\n## 1.3.0\n\n- b\n\n## 1.2.0\n\n- a\n"
+    assert with_changelog_section(text, "1.2.0", ["- b"]) is None
+    assert with_changelog_section(None, "1.0.0", []).startswith("# Changelog\n\n## 1.0.0\n\n- ")
+
+
+def test_lists(env):
+    out = hubra(env, "lists")
+    assert "budgets      1.1.0     ok            shows 1.0.0" in out
+    assert "hubra-plugins/README.md: budgets 1.0.0 -> 1.1.0" in out
+    assert "PR on hubra-plugins" in hubra(env, "lists", "--fix", "--dry-run")
+    assert "hubra-plugins: https://github.com/hubra-app/hubra-plugins/pull/99" in hubra(env, "lists", "--fix")
+
+
+def test_doctor(env):
+    out = hubra(env, "doctor")
+    assert "has_wiki is True" in out and "ruleset tags is missing" in out and "fix: hubra setup budgets" in out
+    assert "release.yml differs from the template's" in out
+    assert "fix: hubra key <keyfile> discord" in out
+    assert "== hubra-app/hubra\n   ok" in hubra(env, "doctor", "hubra")

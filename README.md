@@ -34,6 +34,9 @@ hubra ship                    # merge, then release
 hubra approve                 # approve signing runs waiting for you
 hubra runs --failed           # recent failed Actions runs
 hubra open budgets#12         # open a repo / PR / --actions / --releases page
+hubra bump budgets minor      # PR with plugin.yaml + CHANGELOG for the next version
+hubra lists                   # plugin lists vs releases (--fix opens PRs)
+hubra doctor                  # repo settings that drifted from what setup sets
 hubra setup                   # create new plugin repos, configure all
 hubra key signing.key         # store the plugin signing key
 hubra login                   # save a Hubra API token
@@ -46,9 +49,10 @@ Repo names are plugin short names (`budgets`) or `hubra`, `hubra.club`,
 and `hubra <command> --help` explain every option. `--dry-run` shows what
 would change without changing anything.
 
-After a release, the plugin lists are still yours (hubra
-docs/plugin-releases.md: hubra README, hubra-plugins README, hubra.club
-Modules page).
+A plugin release goes: `hubra bump budgets` (PR with the new version and
+changelog) → merge → `hubra release budgets` → `hubra approve` (signing) →
+`hubra lists --fix` (version bumps in the READMEs; new rows, hubra.club cards
+and the org profile stay yours, see hubra docs/plugin-releases.md).
 
 ## Hubra API
 
@@ -61,6 +65,7 @@ point at another install.
 
 ## TUI keys
 
+Tabs: Repos, Pull requests, Runs, Checks (plugin lists and doctor) and Hubra.
 `r` refresh · `o` open in browser · `m` auto-merge · `M` merge now · `y` mark
 ready · `d` diff · `R` release · `a` approve signing · `q` quit. Every change
 asks first; `hubra tui --dry-run` only shows what it would do.

@@ -93,6 +93,23 @@ if argv[:2] == ["api", "graphql"]:
         "pageInfo": {"hasNextPage": start + size < len(REPOS), "endCursor": str(start + size)},
         "nodes": [repo_node(n, full) for n in page]}}}})
 
+RULES = {"main": ["deletion", "non_fast_forward", "pull_request", "required_status_checks"],
+         "tags": ["deletion", "update", "non_fast_forward"]}
+LISTS = {  # what the made-up plugin lists show
+    "hubra/README.md": "| [Budgets](x) | y | [1.1.0](https://github.com/hubra-app/hubra-plugin-budgets/releases/tag/v1.1.0) |\n"
+                       "| [Discord](x) | y | [2.5.0](https://github.com/hubra-app/hubra-plugin-discord/releases/tag/v2.5.0) |\n",
+    "hubra-plugins/README.md": "| Budgets | x | [1.0.0](https://github.com/hubra-app/hubra-plugin-budgets/releases/tag/v1.0.0) |\n"
+                               "| Discord | x | [2.5.0](https://github.com/hubra-app/hubra-plugin-discord/releases/tag/v2.5.0) |\n",
+    ".github/profile/README.md": "[2.5.0](https://github.com/hubra-app/hubra-plugin-discord/releases/tag/v2.5.0)\n",
+    "hubra.club/src/pages/module.html": '<article data-plugin="budgets"></article><article data-plugin="discord"></article>',
+    "hubra.club/src/pages/en/modules.html": '<article data-plugin="budgets"></article>',
+}
+
+
+def content(text, sha="abc123"):
+    out({"content": base64.b64encode(text.encode()).decode(), "sha": sha})
+
+
 if argv[0] == "api":
     method = argv[argv.index("-X") + 1]
     path = argv[argv.index("-X") + 2]
@@ -104,20 +121,61 @@ if argv[0] == "api":
     repo, rest = m.group(1), m.group(2)
     p = plugin_of(repo)
     if rest == "":
-        out({"default_branch": "main"})
+        out({"default_branch": "main", "delete_branch_on_merge": True, "allow_auto_merge": True,
+             "has_wiki": repo == "hubra-plugin-budgets", "has_projects": False,
+             "security_and_analysis": {"secret_scanning": {"status": "enabled"},
+                                       "secret_scanning_push_protection": {"status": "enabled"}}})
     if rest.startswith("/contents/plugin.yaml"):
         y = yaml(p)
         if not y:
             fail("HTTP 404: Not Found")
-        out({"content": base64.b64encode(y.encode()).decode()})
+        content(y, "yamlsha")
+    if rest.startswith("/contents/CHANGELOG.md"):
+        if repo != "hubra-plugin-budgets":
+            fail("gh: Not Found (HTTP 404)")
+        content("# Changelog\n\n## 1.2.0\n\n- Budget source\n\n## 1.1.0\n\n- Hubra 0.2\n", "clsha")
     if rest.startswith("/contents/.github/rulesets/"):
-        out({"content": base64.b64encode(json.dumps({"name": rest.split("/")[-1][:-5]}).encode()).decode()})
+        name = rest.split("/")[-1][:-5]
+        content(json.dumps({"name": name, "enforcement": "active", "rules": [{"type": t} for t in RULES[name]]}))
+    if rest.startswith("/contents/.github/workflows/release.yml"):
+        content("on: release", "codes-own" if repo == "hubra-plugin-codes" else "template-sha")
+    if rest.startswith("/contents/"):
+        key = f"{repo}/{rest[len('/contents/'):].split('?')[0]}"
+        if key in LISTS:
+            content(LISTS[key])
+        fail("gh: Not Found (HTTP 404)")
+    if rest.startswith("/releases/tags/"):
+        out({"published_at": "2026-11-01T00:00:00Z"})
     if rest.startswith("/releases"):
         out([{"tag_name": t} for t in (p[2] if p else [])])
+    if rest.startswith("/pulls"):
+        out([{"number": 7, "title": "Budget source for tiers", "merged_at": "2026-11-03T10:00:00Z"},
+             {"number": 6, "title": "Release 1.2.0", "merged_at": "2026-11-03T09:00:00Z"},
+             {"number": 5, "title": "Closed without merge", "merged_at": None},
+             {"number": 4, "title": "Older", "merged_at": "2026-10-20T10:00:00Z"}])
+    if rest.startswith("/git/ref/heads/"):
+        out({"object": {"sha": "headsha"}})
     if rest.startswith("/compare/"):
         out({"ahead_by": 12})
+    if rest.startswith("/private-vulnerability-reporting"):
+        out({"enabled": True})
+    if rest.startswith("/rulesets/"):
+        rid = int(rest.split("/")[2])
+        name = "main" if rid == 1 else "tags"
+        rules = RULES[name] if repo != "hubra-plugin-codes" else RULES[name][:1]
+        out({"name": name, "enforcement": "active", "rules": [{"type": t} for t in rules]})
     if rest.startswith("/rulesets"):
-        out([{"name": "main", "id": 1}])
+        sets = [{"name": "main", "id": 1}]
+        if repo != "hubra-plugin-budgets":
+            sets.append({"name": "tags", "id": 2})
+        out(sets)
+    if rest == "/environments/plugin-signing":
+        out({"protection_rules": [{"type": "required_reviewers", "reviewers": [{"type": "User"}]}],
+             "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}})
+    if rest.startswith("/environments/plugin-signing/deployment-branch-policies"):
+        out({"branch_policies": [{"name": "v*", "type": "tag"}]})
+    if rest.startswith("/environments/plugin-signing/secrets"):
+        out({"secrets": [] if repo == "hubra-plugin-discord" else [{"name": "HUBRA_SIGNING_KEY"}]})
     if "/pending_deployments" in rest:
         out([{"environment": {"id": 77, "name": "plugin-signing"}, "current_user_can_approve": True}])
     if rest.startswith("/actions/runs"):
@@ -166,6 +224,9 @@ if argv[0] == "pr":
                       "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://x"}],
                  reviews=[{"author": {"login": "someone"}, "state": "CHANGES_REQUESTED", "body": "pls"}],
                  body="Bumps budgets to 1.2.0.\n\nCloses #3"))
+    if argv[1] == "create":
+        print(f"https://github.com/{ORG}/{repo}/pull/99")
+        sys.exit(0)
     if argv[1] in ("merge", "ready"):
         sys.exit(0)
     if argv[1] == "diff":

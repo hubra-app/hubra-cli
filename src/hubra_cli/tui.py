@@ -5,6 +5,7 @@ Start it with `hubra tui` (needs the tui extra: `pipx install 'hubra-cli[tui]'`)
   Repos          version on main, latest release, what's left to release, PRs, CI
   Pull requests  every open PR; the right side shows the selected one in depth
   Runs           signing runs waiting for you, then the newest run per repo
+  Checks         plugin lists against the releases, repo settings (doctor)
   Hubra          health, alerts, errors, jobs and token of the running Hubra
                  (needs a token: `hubra login` or HUBRA_TOKEN)
 
@@ -39,6 +40,8 @@ from textual.widgets import (
 from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 
 from hubra_cli import cli as g
+
+CHECKS = [("lists", "Plugin lists"), ("doctor", "Repo settings")]
 
 HUBRA_SECTIONS = [
     ("health", "Health", "/app/platform/diagnostics"),
@@ -98,7 +101,7 @@ class HubraTui(App):
     .split { height: 1fr; }
     .split DataTable { width: 3fr; height: 1fr; }
     .split VerticalScroll { width: 2fr; height: 1fr; border-left: solid $primary; padding: 0 1; }
-    #hubra-table { width: 22; }
+    #hubra-table, #checks-table { width: 22; }
     #log { height: 7; border-top: solid $primary; }
     """
     BINDINGS: ClassVar = [
@@ -131,7 +134,7 @@ class HubraTui(App):
         yield Header()
         with TabbedContent(id="tabs"):
             for tab_id, title in (("repos", "Repos"), ("prs", "Pull requests"),
-                                  ("runs", "Runs"), ("hubra", "Hubra")):
+                                  ("runs", "Runs"), ("checks", "Checks"), ("hubra", "Hubra")):
                 with TabPane(title, id=tab_id), Horizontal(classes="split"):
                     yield DataTable(id=f"{tab_id}-table", cursor_type="row", zebra_stripes=True)
                     with VerticalScroll():
@@ -144,6 +147,7 @@ class HubraTui(App):
             "repos": g.STATUS_HEAD,
             "prs": ["repo", "#", "title", "state", "checks"],
             "runs": ["repo", "state", "workflow", "ref", "when"],
+            "checks": ["check"],
             "hubra": ["view"],
         }
         for tab_id, head in heads.items():
@@ -151,6 +155,9 @@ class HubraTui(App):
         hubra = self.query_one("#hubra-table", DataTable)
         for key, label, _ in HUBRA_SECTIONS:
             hubra.add_row(label, key=key)
+        checks = self.query_one("#checks-table", DataTable)
+        for key, label in CHECKS:
+            checks.add_row(label, key=key)
         self.log_line("Loading … (r refreshes, q quits)")
         self.load_github()
         self.load_runs()
@@ -306,12 +313,13 @@ class HubraTui(App):
             if envs:
                 lines += ["", f"Waits for: {', '.join(e['name'] for e in envs)}", "a approves it"]
             self.show("runs", "\n".join(lines))
-        elif tab == "hubra":
-            if key in self.detail_cache:
-                self.show("hubra", self.detail_cache[key])
+        elif tab in ("hubra", "checks"):
+            cache_key = f"{tab}:{key}"
+            if cache_key in self.detail_cache:
+                self.show(tab, self.detail_cache[cache_key])
             else:
-                self.show("hubra", "Loading …")
-                self.load_hubra(key)
+                self.show(tab, "Checking …" if tab == "checks" else "Loading …")
+                self.load_view(tab, key)
 
     def repo_text(self, repo: str) -> str:
         node = self.info.get(g.short(repo)) or {}
@@ -342,10 +350,15 @@ class HubraTui(App):
         self.call_from_thread(self.show_if_current, "prs", key, text)
 
     @work(thread=True, group="detail")
-    def load_hubra(self, key: str) -> None:
-        text = g.capture(g.HUBRA_VIEWS[key])
-        self.detail_cache[key] = text
-        self.call_from_thread(self.show_if_current, "hubra", key, text)
+    def load_view(self, tab: str, key: str) -> None:
+        if tab == "hubra":
+            text = g.capture(g.HUBRA_VIEWS[key])
+        elif key == "lists":
+            text = g.capture(g.lists, False)
+        else:
+            text = g.capture(g.doctor_all, [r for r in self.repos if g.is_plugin(r)])
+        self.detail_cache[f"{tab}:{key}"] = text
+        self.call_from_thread(self.show_if_current, tab, key, text)
 
     def show_if_current(self, tab: str, key: str, text: str) -> None:
         if self.tab() == tab and self.current_key(tab) == key:
@@ -357,7 +370,7 @@ class HubraTui(App):
         self.detail_cache.clear()
         self.load_github()
         self.load_runs()
-        if self.tab() == "hubra":
+        if self.tab() in ("hubra", "checks"):
             self.update_detail()
 
     def action_open(self) -> None:
@@ -370,6 +383,9 @@ class HubraTui(App):
             url = self.prs[key]["url"]
         elif tab == "runs":
             url = self.runs[key][1]["html_url"]
+        elif tab == "checks":
+            docs = f"{g.WEB}/{g.ORG}/hubra/blob/main/docs/plugin-releases.md"
+            url = docs if key == "lists" else f"{g.WEB}/{g.TEMPLATE}"
         else:
             url = g.MANAGE + {k: path for k, _, path in HUBRA_SECTIONS}[key]
         self.log_line(f"open {url}")
