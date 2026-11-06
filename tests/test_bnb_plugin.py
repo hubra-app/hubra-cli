@@ -36,10 +36,11 @@ def test_commands_run_hubra(env, monkeypatch, capsys):
 
     parser = argparse.ArgumentParser()
     handlers = HubraPlugin().add_commands(parser.add_subparsers(dest="cmd"))
-    assert {"release", "ship", "bump", "verify", "key", "setup", "lists", "hubra"} <= set(handlers)
-    args, extra = parser.parse_known_args(["release", "--dry-run", "budgets"])
+    assert {"ship", "verify", "key", "setup", "lists", "hubra"} <= set(handlers)
+    assert not {"bump", "release"} & set(handlers)  # bnb's own
+    args, extra = parser.parse_known_args(["ship", "--dry-run", "budgets"])
     args._extra = extra
-    handlers["release"](args)
+    handlers["ship"](args)
     assert "[dry-run] push tag v1.2.0" in capsys.readouterr().out
 
 
@@ -67,5 +68,5 @@ def test_tui_parts(env, monkeypatch):
     assert tab["id"] == "hubra" and ("health", "Health") in tab["rows"]
     assert "12 commits behind main" in tab["text"]("health")
     assert tab["url"]("jobs").endswith("/app/platform/diagnostics/jobs")
-    assert [k for k, _, _ in p.tui_keys()] == ["b", "R", "S"]
+    assert [k for k, _, _ in p.tui_keys()] == ["S"]
     assert [t.name for t in p.tui_themes()] == ["hubra", "hubra-light"]
