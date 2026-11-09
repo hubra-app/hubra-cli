@@ -1,0 +1,6 @@
+# Mason (the `mason` command and the web app) reads this file for bump, release
+# and New tag. Only the [release] table counts; checks live in the defaults.
+# The version is __version__ in the package (pyproject.toml reads it from there).
+[release]
+version = "src/hubra_cli/__init__.py"
+tag = "v{version}"

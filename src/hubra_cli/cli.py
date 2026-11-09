@@ -1626,7 +1626,7 @@ def security(repos: list[str]) -> None:
 # Files every plugin shares with the template. The rest (plugin code, README,
 # CHANGELOG, .releaseignore) belongs to the plugin.
 SYNC_FILES = (".gitattributes", ".gitignore", ".github/pull_request_template.md", ".github/rulesets/main.json",
-              ".github/rulesets/tags.json", ".github/workflows/release.yml", "LICENSE", "SECURITY.md")
+              ".github/rulesets/tags.json", ".github/workflows/release.yml", ".mason.toml", "LICENSE", "SECURITY.md")
 
 
 def blob_shas(repo: str, ref: str = "main") -> dict[str, str]:
