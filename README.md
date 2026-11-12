@@ -1,5 +1,7 @@
 # hubra-cli
 
+[![CI](https://github.com/hubra-app/hubra-cli/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hubra-app/hubra-cli/actions/workflows/ci.yml?query=branch%3Amain) [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-bitsandbricks-ffdd00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/bitsandbricks)
+
 The `hubra` command for the hubra-app GitHub repos and the running Hubra:
 status of every repo, pull requests, merges, plugin releases, signing
 approvals, and Hubra's health, alerts, errors and jobs. `hubra tui` shows all
